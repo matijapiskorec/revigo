@@ -6,6 +6,9 @@ var app = new Vue({
     data: {
         message: 'Hello Vue!',
         dag: [],
+        dagBio: [],
+        dagMol: [],
+        dagCell: [],
         terms: [],
         enrichments: [],
         dataLoaded: false,
@@ -52,6 +55,21 @@ var app = new Vue({
             }
         },
 
+        ontologyName: function(newOntologyName, oldOntologyName) {
+            console.log("revigo/watch/ontologyName: Changed value to "+newOntologyName);
+            if (newOntologyName=="biological processes") {
+                this.dag = this.dagBio;
+            } else if (newOntologyName=="molecular function") {
+                this.dag = this.dagMol;
+            } else if (newOntologyName=="cellular component") {
+                this.dag = this.dagCell;
+            }
+            this.enrichmentsSelected = Object.entries(this.enrichments)
+                                             .filter( x => this.dag.hasOwnProperty(x[0]) )
+                                             .filter( x => x[1] < 0.01);
+            this.calculateLCA();
+        },
+
         results: function(newResults, oldResults) {
 
             let similarity = newResults.map( (x) => [x[0], x[1], this.terms[x[2]]]);
@@ -93,6 +111,9 @@ var app = new Vue({
                "data/revigo-enrichments1.json"].map(url=>vm.getUrl(url)))
                .then(([dagMol,dagCell,dagBio,terms,enrichments]) => {
                     vm.dag = dagBio;
+                    vm.dagBio = dagBio;
+                    vm.dagMol = dagMol;
+                    vm.dagCell = dagCell;
                     vm.terms = terms;
                     vm.enrichments = enrichments;
                     vm.dataLoaded = true;
@@ -151,6 +172,7 @@ var app = new Vue({
             return result;
         }
     }
+
 });
 
 Vue.component('progress-box', {
@@ -174,13 +196,24 @@ Vue.component('scatter-plot', {
     props: ["distmat","enrichments"],
         data: function () {
             return {
-                canvas: null
+                canvas: null,
+                intervalID: null,
+                distmatLocal: null, // local version of parent prop distance matrix
+                enrichmentsLocal: null // local version of parent prop enrichments
             }
     },
     computed: {
+        // Will run whenever either of the props changes in the parent element
+        // Have to check that both props are updated to the same set of GO terms
         dataLoaded: function() {
-            // Checking whether both props are calculated from the parent element
-            return this.distmat.length!=0 && this.enrichments.length!=0;
+            console.log("scatter-plot/computed/dataLoaded: Someone changed dataLoaded!");
+            // TODO: Not entirely correct - if both old and new data have same number
+            // of GO terms this will pass but the GO terms will not match!
+            if (this.distmat.length!=0 && this.enrichments.length!=0 &&
+                this.distmat.length==this.enrichments.length) {
+                // Drawing will be done in watch expression 
+                return true;
+            }
         }
     },
     watch: {
@@ -188,6 +221,10 @@ Vue.component('scatter-plot', {
             if (newDataLoaded) {
                 console.log("scatter-plot/watch/dataLoaded: All data successfully loaded!");
                 let vm = this;
+                // Only when both distmat and enrichments are loaded we update the
+                // local version simultaneously
+                this.distmatLocal = this.distmat;
+                this.enrichmentsLocal = this.enrichments;
                 this.drawPlot();
            }
         }
@@ -196,11 +233,15 @@ Vue.component('scatter-plot', {
         drawPlot: function() {
             let vm = this;
 
+            // Stop any previous setInterval() function
+            clearInterval(this.intervalID);
+
             // Prepare canvas
             this.canvas = vm.$el; 
             this.context = this.canvas.getContext("2d");
             width = this.canvas.width,
             height = this.canvas.height;
+            vm.context.clearRect(0, 0, width, height);
 
             // Calculating t-SNE
             var opt = {}
@@ -209,7 +250,7 @@ Vue.component('scatter-plot', {
             opt.dim = 2; // dimensionality of the embedding 
 
             var tsne = new tsnejs.tSNE(opt); // create a tSNE instance
-            tsne.initDataDist(this.distmat);
+            tsne.initDataDist(this.distmatLocal);
 
             // Initial iterations before we start dynamic visualization
             for(var k = 0; k < 10; k++) {
@@ -218,7 +259,7 @@ Vue.component('scatter-plot', {
 
             // Returns control to the browser so that canvas can be redrawn
             // Time interval is set to 0, with no delay between redrawing
-            setInterval(function() {
+            this.intervalID = setInterval(function() {
                 for(var k = 0; k < 1; k++) {
                     tsne.step(); // every time you call this, solution gets better
                 }
@@ -231,7 +272,7 @@ Vue.component('scatter-plot', {
                 Y.forEach(function(y,i) {
                 vm.drawNode(y,Y0min,Y0max,Y1min,Y1max,
                         width,height,vm.context,
-                        vm.enrichments[i][0].substring(3));
+                        vm.enrichmentsLocal[i][0].substring(3));
                 });
             },0);
         },

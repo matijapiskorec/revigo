@@ -17,6 +17,17 @@
     <div id="revigo">
         <scatter-plot :distmat="distmat" :enrichments="enrichmentsSelected" width=500 height=500></scatter-plot>
         <progress-box :data="loadingStatus"></progress-box>
+
+        <p>Choose the ontology namespace:</p>
+        <input type="radio" id="bio" value="biological processes" v-model="ontologyName">
+        <label for="bio">biological processes</label>
+        <br>
+        <input type="radio" id="mol" value="molecular function" v-model="ontologyName">
+        <label for="mol">molecular function</label>
+        <br>
+        <input type="radio" id="cell" value="cellular component" v-model="ontologyName">
+        <label for="cell">cellular component</label>
+
     </div> 
 </body>
 
