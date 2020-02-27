@@ -1,3 +1,4 @@
+var temp;
 
 var app = new Vue({
     
@@ -21,7 +22,8 @@ var app = new Vue({
         results: [],
         distmat: [],
         enrichmentsSelected: [],
-        loadingStatus: [true, 0, 0, 0, ""] // [statusLoading, length, t0, t1, label]
+        loadingStatus: [true, 0, 0, 0, ""], // [statusLoading, length, t0, t1, label]
+        similarityMeasure: 'resnik' // resnik, lin, rel, jiang
     },
 
     created: function() {
@@ -70,28 +72,13 @@ var app = new Vue({
             this.calculateLCA();
         },
 
+        similarityMeasure: function(newSimilarityMeasure, oldSimilarityMeasure) {
+            console.log("revigo/watch/similarityMeasure: Changed value to "+newSimilarityMeasure);
+            this.calculateDistanceMatrix();
+        },
+
         results: function(newResults, oldResults) {
-
-            let similarity = newResults.map( (x) => [x[0], x[1], this.terms[x[2]]]);
-
-            // Select only pairs which have actual values
-            similarity = similarity.filter( x => x[2] );
-
-            // List of GO terms for visualization
-            let goTerms = similarity.map(x=>[x[0],x[1]]).flat().unique()
-
-            // Default max value which we use for t-sne distance matrix 
-            let maxValue = Math.max.apply(Math, similarity.map(x=>x[2]));
-            let distMat = [...Array(goTerms.length)].map(e=>Array(goTerms.length).fill(maxValue));
-            for (const x of similarity) {
-                let x0 = this.termsToId.get(x[0]);
-                let x1 = this.termsToId.get(x[1]);
-                distMat[x0][x1] = x[2];
-                distMat[x1][x0] = x[2];
-            }
-            // Final distance matrix passed to child components is assigned only once!
-            this.distmat = distMat;
-            console.log("revigo/watch/results: Created distance matrix!");
+            this.calculateDistanceMatrix();
         }
     },
 
@@ -107,7 +94,7 @@ var app = new Vue({
             Promise.all(["data/go-dag-molecular-function.json",
                "data/go-dag-cellular-component.json",
                "data/go-dag-biological-process.json",
-               "data/go-terms-logcount-goa.json",
+               "data/go-terms-count-goa.json",
                "data/revigo-enrichments1.json"].map(url=>vm.getUrl(url)))
                .then(([dagMol,dagCell,dagBio,terms,enrichments]) => {
                     vm.dag = dagBio;
@@ -170,6 +157,80 @@ var app = new Vue({
                 }
             }
             return result;
+        },
+
+        csvURI2: function() {
+            return this.distmat.map(e=>e.toString()).join("\n");
+        },
+
+        calculateDistanceMatrix: function() {
+
+            let similarity = this.semanticSimilarity(this.results,this.terms,this.similarityMeasure);
+
+            // List of GO terms for visualization
+            let goTerms = similarity.map(x=>[x[0],x[1]]).flat().unique()
+
+            // Default max value which we use for t-sne distance matrix 
+            let maxValue = Math.max.apply(Math, similarity.map(x=>x[2]));
+            let distMat = [...Array(goTerms.length)].map(e=>Array(goTerms.length).fill(maxValue));
+            for (const x of similarity) {
+                let x0 = this.termsToId.get(x[0]);
+                let x1 = this.termsToId.get(x[1]);
+                distMat[x0][x1] = x[2];
+                distMat[x1][x0] = x[2];
+            }
+            // Final distance matrix passed to child components is assigned only once!
+            this.distmat = distMat;
+            console.log("revigo/methods/calculateDistanceMatrix: Created distance matrix!");
+
+        },
+
+        // Calculate semantic similarity between terms
+        // GO terms that do not have any annotations in GOA are considered to have at least one!
+        semanticSimilarity: function(results,terms,type) {
+
+            // results: an array of GO term triplets - [term1,term2,lca]
+            // terms: number of annotations for each GO term
+            // Type: resnik, lin, rel, jiang
+
+            let totalAnnotations = Object.entries(terms).reduce((sum,x)=>sum+x[1],0);
+
+            // If terms contains raw counts we have to calculate p(t) and IC(t) from scratch
+            // IC(t) = -log(p(t))
+            // p(t) = n(t)/N
+
+            // TODO: Some GO terms in this.terms are missing, for example GO:0009208!
+
+            switch (type) {
+
+                case 'resnik':
+
+                    // Resnik method: sim(t1,t2) = IC(LCA)
+                    return results.map( (x) => [x[0], x[1], -Math.log((terms[x[2]]||1)/totalAnnotations)] );
+                    break;
+
+                case 'lin':
+
+                    // Lin method: sim(t1,t2) = 2*IC(LCA) / (IC(t1)+IC(t2))
+                    return results.map( (x) => [x[0], x[1], 2*(-Math.log((terms[x[2]]||1)/totalAnnotations))/(-Math.log((terms[x[0]]||1)/totalAnnotations)-Math.log((terms[x[1]]||1)/totalAnnotations)) ]);
+                    break;
+
+                case 'rel':
+
+                    // Rel method: sim(t1,t2) = 2*IC(LCA)*(1-p(LCA)) / (IC(t1)+IC(t2))
+                    return results.map( (x) => [x[0], x[1], 2*(-Math.log((terms[x[2]]||1)/totalAnnotations)) * (1 - ((terms[x[2]]||1)/totalAnnotations)) / (-Math.log((terms[x[0]]||1)/totalAnnotations)-Math.log((terms[x[1]]||1)/totalAnnotations)) ]);
+                    break;
+
+                case 'jiang':
+
+                    // Jiang method: sim(t1,t2) = 1 - min(1,IC(t1)+IC(t2)-2*IC(LCA))
+                    return results.map( (x) => [x[0], x[1], 1 - Math.min( 1, (-Math.log((terms[x[0]]||1)/totalAnnotations)-Math.log((terms[x[1]]||1)/totalAnnotations)) - 2*(-Math.log((terms[x[2]]||1)/totalAnnotations)) )] );
+                    break;
+
+                default:
+                    return [];
+            }
+
         }
     }
 
@@ -212,21 +273,20 @@ Vue.component('scatter-plot', {
             if (this.distmat.length!=0 && this.enrichments.length!=0 &&
                 this.distmat.length==this.enrichments.length) {
                 // Drawing will be done in watch expression 
-                return true;
+                // TODO: Whenever distmat or enrichments change we want to send an unique value to watch! 
+                return Date.now();
             }
         }
     },
     watch: {
         dataLoaded(newDataLoaded, oldDataLoaded) {
-            if (newDataLoaded) {
-                console.log("scatter-plot/watch/dataLoaded: All data successfully loaded!");
-                let vm = this;
-                // Only when both distmat and enrichments are loaded we update the
-                // local version simultaneously
-                this.distmatLocal = this.distmat;
-                this.enrichmentsLocal = this.enrichments;
-                this.drawPlot();
-           }
+            console.log("scatter-plot/watch/dataLoaded: All data successfully loaded!");
+            let vm = this;
+            // Only when both distmat and enrichments are loaded we update the local version simultaneously
+            this.distmatLocal = this.distmat;
+            this.enrichmentsLocal = this.enrichments;
+            console.log("scatter-plot/watch/dataLoaded: distmatLocal.lenght="+this.distmatLocal.length+", enrichmentsLocal.length="+this.enrichmentsLocal.length);
+            this.drawPlot();
         }
     },
     methods: {
@@ -246,7 +306,7 @@ Vue.component('scatter-plot', {
             // Calculating t-SNE
             var opt = {}
             opt.epsilon = 10; // learning rate 
-            opt.perplexity = 20; // roughly how many neighbors each point influences 
+            opt.perplexity = 10; // roughly how many neighbors each point influences 
             opt.dim = 2; // dimensionality of the embedding 
 
             var tsne = new tsnejs.tSNE(opt); // create a tSNE instance
@@ -269,10 +329,13 @@ Vue.component('scatter-plot', {
                 Y1min = Math.min(...Y.map(x=>x[1]));
                 Y1max = Math.max(...Y.map(x=>x[1]));
                 vm.context.clearRect(0, 0, width, height);
+
+                // TODO: In some cases there is an error that vm.enrichmentsLocal[i] is not defined!
+
                 Y.forEach(function(y,i) {
-                vm.drawNode(y,Y0min,Y0max,Y1min,Y1max,
-                        width,height,vm.context,
-                        vm.enrichmentsLocal[i][0].substring(3));
+                    vm.drawNode(y,Y0min,Y0max,Y1min,Y1max,
+                            width,height,vm.context,
+                            vm.enrichmentsLocal[i][0].substring(3));
                 });
             },0);
         },
@@ -308,4 +371,31 @@ Array.prototype.unique = function() {
     });
 }
 
+Vue.component('download-csv', {
+    props: ["distmat","ontology","similarity"], 
+    data: function() {
+        return;
+    },
+    computed: {
+        message: function() {
+            return this.distmat.length > 0 ? "data:text/csv," + encodeURIComponent(this.distmat.map(e=>e.toString()).join("\n")) : 'javascript:void(0);';
+        },
+        matrixShape: function() {
+            return this.distmat.length+'x'+this.distmat.length;
+        },
+        similarityFullName: function() {
+            let dict = {'resnik':'Resnik','lin':'Lin','rel':'SimRel','jiang':'Jiang'}
+            return dict[this.similarity];
+        }
+    },
+    template: '<a v-bind:href="message" download="distmat.csv">Download {{similarityFullName}} distance matrix for {{ontology}} ({{matrixShape}})</a>'
+});
+
+// A custom function for applying map to all object properties
+const objectMap = (obj, fn) =>
+    Object.fromEntries(
+        Object.entries(obj).map(
+            ([k, v], i) => [k, fn(v, k, i)]
+        )
+    )
 

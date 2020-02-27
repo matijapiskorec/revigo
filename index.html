@@ -6,7 +6,16 @@
 <script src="static/jquery-3.4.1.min.js"></script>
 <script src="static/tsne.js"></script>
 <script src="static/vue.min.js"></script>
+<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <!-- <script src="static/d3.v5.min.js"></script> -->
+
+<script>
+MathJax = {
+    tex: {
+        tags: 'all'
+    }
+};
+</script>
 
 <head>
   <title>Lowest common ancestor algorithm in DAGs</title>
@@ -27,6 +36,23 @@
         <br>
         <input type="radio" id="cell" value="cellular component" v-model="ontologyName">
         <label for="cell">cellular component</label>
+
+        <br><br>
+        <p>Choose the semantic similarity measure</p>
+        <input type="radio" id="resnik" value="resnik" v-model="similarityMeasure">
+        <label for="resnik">Resnik method \( sim(t_1,t_2) = IC(t_{LCA}) \)</label>
+        <br>
+        <input type="radio" id="lin" value="lin" v-model="similarityMeasure">
+        <label for="lin">Lin method \( sim(t_1,t_2) = \frac{2 IC(t_{LCA})}{IC(t_1)+IC(t_2)} \)</label>
+        <br>
+        <input type="radio" id="rel" value="rel" v-model="similarityMeasure">
+        <label for="rel">SimRel method \( sim(t_1,t_2) = \frac{2 IC(t_{LCA}) (1-p(t_{LCA}))}{IC(t_1)+IC(t_2)}  \)</label>
+        <br>
+        <input type="radio" id="jiang" value="jiang" v-model="similarityMeasure">
+        <label for="jiang">Jiang method \( sim(t_1,t_2) = 1 - min(1, IC(t_1)+IC(t_2)-2IC(t_{LCA})) \)</label>
+        
+        <br><br>
+        <download-csv :distmat="distmat" :ontology="ontologyName" :similarity="similarityMeasure"></download-csv>
 
     </div> 
 </body>
