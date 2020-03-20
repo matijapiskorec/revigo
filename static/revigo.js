@@ -22,6 +22,7 @@ var app = new Vue({
         results: [],
         distmat: [],
         enrichmentsSelected: [],
+        termsData: [], // data on selected GO terms
         loadingStatus: [true, 0, 0, 0, ""], // [statusLoading, length, t0, t1, label]
         similarityMeasure: 'resnik' // resnik, lin, rel, jiang
     },
@@ -34,25 +35,17 @@ var app = new Vue({
         // Worker which will calculate LCA in a separate thread
         // NOTE: make sure your browser does not load old cached version!
         this.lcaWorker = new Worker('static/worker-lca.js');
+
+        console.log('revigo/created: New worker created!');
     },
 
     watch: {
 
         dataLoaded: function(newDataLoaded,oldDataLoaded) {
 
-            // Sometimes this reference gets confused, especially when used in a callback
-            // So it is safe to define it explicitly
-            let vm = this;
             if (newDataLoaded) {
-
                 console.log("revigo/watch/dataLoaded: All data successfully loaded!");
-
-                // Selecting only enrichements from a specific ontology namespace
-                // Selecting only small p-values
-                // NOTE: It is passed to child component so we assign it only once!
-                this.enrichmentsSelected = Object.entries(this.enrichments)
-                                                 .filter( x => this.dag.hasOwnProperty(x[0]) )
-                                                 .filter( x => x[1] < 0.01);
+                this.filterEnrichments(0.01);
                 this.calculateLCA();
             }
         },
@@ -66,9 +59,8 @@ var app = new Vue({
             } else if (newOntologyName=="cellular component") {
                 this.dag = this.dagCell;
             }
-            this.enrichmentsSelected = Object.entries(this.enrichments)
-                                             .filter( x => this.dag.hasOwnProperty(x[0]) )
-                                             .filter( x => x[1] < 0.01);
+            this.filterEnrichments(0.01);
+
             this.calculateLCA();
         },
 
@@ -83,6 +75,26 @@ var app = new Vue({
     },
 
     methods: {
+
+        // Select only enrichements from a current ontology space and with small p-value
+        filterEnrichments: function(pvalue) {
+            var vm = this; 
+            // NOTE: It is passed to child component so we assign it only once!
+            this.enrichmentsSelected = Object.entries(this.enrichments)
+                                             .filter( x => this.dag.hasOwnProperty(x[0]) )
+                                             .filter( x => x[1] < 0.01);
+            
+            // TODO: Create one dataset with all information on GO terms which will be passed to visuals!
+            this.termsData = new Map(Object.entries(this.enrichmentsSelected).map( function(d,i) {
+                var key = d[1][0];
+                var value = d[1][1];
+                return [key,
+                        {'pvalue': value, 'frequency': vm.terms[d[1][0]] || 1}
+                ];
+            }));
+            // console.log(this.termsData);
+
+        },
 
         // Fetch all needed data - DAG, term counts, enrichments
         fetchData: function() {
@@ -157,10 +169,6 @@ var app = new Vue({
                 }
             }
             return result;
-        },
-
-        csvURI2: function() {
-            return this.distmat.map(e=>e.toString()).join("\n");
         },
 
         calculateDistanceMatrix: function() {
@@ -244,9 +252,13 @@ Vue.component('progress-box', {
     computed: {
         message: function() {
             if (this.data[0]) {
-                return 'Calculating semantic similarities between '+this.data[1]+' selected '+this.data[4]+' GO terms with p<0.01 <img src="static/ajax-loader.gif">';
+                return 'Calculating semantic similarities between '+this.data[1]+
+                       ' selected '+this.data[4]+
+                       ' GO terms with p<0.01 <img src="static/ajax-loader.gif">';
              } else if (!this.data[0]) {
-                return "Calculated semantic similaritites between "+this.data[1]+" selected "+this.data[4]+" GO terms with p<0.01 GO terms in "+(this.data[3]-this.data[2])+" miliseconds!";
+                return "Calculated semantic similaritites between "+this.data[1]+
+                       " selected "+this.data[4]+
+                       " GO terms with p<0.01 GO terms in "+(this.data[3]-this.data[2])+" miliseconds!";
              }
         }
     },
@@ -254,14 +266,47 @@ Vue.component('progress-box', {
 });
 
 Vue.component('scatter-plot', {
-    props: ["distmat","enrichments"],
+    props: ["distmat","enrichments","termsdata"],
         data: function () {
             return {
                 canvas: null,
+                width: 500, 
+                height: 500, 
                 intervalID: null,
                 distmatLocal: null, // local version of parent prop distance matrix
-                enrichmentsLocal: null // local version of parent prop enrichments
+                enrichmentsLocal: null, // local version of parent prop enrichments
+                termsDataLocal: null,
+                custom: null,
+                qtree: null,
+                scaleX: null,
+                scaleY: null,
+                scaleR: null,
+                coordToData: null
             }
+    },
+    mounted: function() {
+
+        // TODO: Consider putting this in separate css file!
+        // Needed so that tooltips (which have absolute position) are positioned correctly
+        d3.select(this.$el).style('position','relative');
+
+        // Prepare canvas
+        this.canvas = d3.select(this.$el)
+                        .append('canvas')
+                        .classed('mainCanvas', true)
+                        .attr('width',this.width)
+                        .attr('height',this.height);
+
+		var customBase = document.createElement('custom');
+		this.custom = d3.select(customBase); 
+
+        this.scaleX = d3.scaleLinear().range([0, this.width]);
+        this.scaleY = d3.scaleLinear().range([0, this.height]);
+        this.scaleR = d3.scaleLog().range([4, 10]);
+        this.scaleP = d3.scaleLog().range(['red','steelblue']);
+        
+        d3.select(this.$el).append("div").attr("id","tooltip");
+
     },
     computed: {
         // Will run whenever either of the props changes in the parent element
@@ -282,26 +327,37 @@ Vue.component('scatter-plot', {
         dataLoaded(newDataLoaded, oldDataLoaded) {
             console.log("scatter-plot/watch/dataLoaded: All data successfully loaded!");
             let vm = this;
+
             // Only when both distmat and enrichments are loaded we update the local version simultaneously
             this.distmatLocal = this.distmat;
             this.enrichmentsLocal = this.enrichments;
-            console.log("scatter-plot/watch/dataLoaded: distmatLocal.lenght="+this.distmatLocal.length+", enrichmentsLocal.length="+this.enrichmentsLocal.length);
-            this.drawPlot();
+            this.termsDataLocal = this.termsdata;
+
+            console.log("scatter-plot/watch/dataLoaded: distmatLocal.lenght="+this.distmatLocal.length+
+                        ", enrichmentsLocal.length="+this.enrichmentsLocal.length+
+                        ", termsDataLocal.length="+this.termsDataLocal.size);
+
+            // Set scale for radius which depends on the pvalues of newly loaded GO terms
+            fmax = Math.max(...Array.from(this.termsDataLocal.values()).map(x=>x.frequency));
+            fmin = Math.min(...Array.from(this.termsDataLocal.values()).map(x=>x.frequency));
+            vm.scaleR.domain([fmin, fmax]);
+
+            // Set scale for radius which depends on the pvalues of newly loaded GO terms
+            pmax = Math.max(...Array.from(this.termsDataLocal.values()).map(x=>x.pvalue));
+            pmin = Math.min(...Array.from(this.termsDataLocal.values()).map(x=>x.pvalue));
+            vm.scaleP.domain([pmin, pmax]);
+
+            this.drawCanvas();
         }
     },
     methods: {
-        drawPlot: function() {
+
+        drawCanvas: function() {
             let vm = this;
 
             // Stop any previous setInterval() function
+            console.log("scatter-plot/methods/drawCanvas: Clearing setInterval with ID: "+this.intervalID);
             clearInterval(this.intervalID);
-
-            // Prepare canvas
-            this.canvas = vm.$el; 
-            this.context = this.canvas.getContext("2d");
-            width = this.canvas.width,
-            height = this.canvas.height;
-            vm.context.clearRect(0, 0, width, height);
 
             // Calculating t-SNE
             var opt = {}
@@ -317,6 +373,8 @@ Vue.component('scatter-plot', {
                 tsne.step(); 
             }
 
+            var goterms = Array.from(vm.termsDataLocal.keys());
+            
             // Returns control to the browser so that canvas can be redrawn
             // Time interval is set to 0, with no delay between redrawing
             this.intervalID = setInterval(function() {
@@ -328,40 +386,121 @@ Vue.component('scatter-plot', {
                 Y0max = Math.max(...Y.map(x=>x[0]));
                 Y1min = Math.min(...Y.map(x=>x[1]));
                 Y1max = Math.max(...Y.map(x=>x[1]));
-                vm.context.clearRect(0, 0, width, height);
 
-                // TODO: In some cases there is an error that vm.enrichmentsLocal[i] is not defined!
+                vm.scaleX.domain([Y0min, Y0max]);
+                vm.scaleY.domain([Y1min, Y1max]);
 
-                Y.forEach(function(y,i) {
-                    vm.drawNode(y,Y0min,Y0max,Y1min,Y1max,
-                            width,height,vm.context,
-                            vm.enrichmentsLocal[i][0].substring(3));
-                });
+                vm.qtree = d3.quadtree()
+                  .addAll(Y.map(d=>[vm.scaleX(d[0]),vm.scaleY(d[1])]));
+
+                // Connect point coordinates with the information on the corresponding GO term
+                vm.coordToData = new Map(Y.map( function(d,i) {
+                    
+                    // We have to stringify coordinates to use them as key, arrays won't work!
+                    var key = String([vm.scaleX(d[0]),vm.scaleY(d[1])]);
+
+                    // TODO: Possible error "value is not defined"
+                    // This happens because termsLocalData updates while goterms still has old value
+                    var value = vm.termsDataLocal.get(goterms[i]);
+                    value.name = goterms[i];
+                    value.x = Y[i][0];
+                    value.y = Y[i][1];
+                    return [key,value];
+
+                }));
+
+
+                // Bind data to visual elements (does not draw anything yet!)
+                // TODO: Maybe move variable declaration outside setInterval?
+                var join = vm.custom.selectAll('custom.circle')
+                    .data(Array.from(vm.coordToData.values()))
+                    .enter()
+                    .append('custom')
+                    .attr('class', 'circle')
+                    .attr('x', function(d, i) { return vm.scaleX(d.x); })
+                    .attr('y', function(d, i) { return vm.scaleY(d.y); })
+                    .attr('radius', function(d){ return vm.scaleR(d.frequency); })
+                    .attr('label',function(d){ return d.name; }) 
+                    .attr('fillStyle', function(d) { return vm.scaleP(d.pvalue); }); 
+
+                // Draw data that was bound to visual elements
+                // TODO: Not sure this is really needed?!
+                var exitSel = join.exit()
+                    .transition()
+                    .attr('radius', 0)
+                    .remove();
+
+                if (Y.length==vm.enrichmentsLocal.length) {
+                    vm.drawNodes(vm.canvas,false);
+                }
+
             },0);
+
+
+            d3.select('.mainCanvas').on('mousemove', function() {
+
+                var xy = d3.mouse(this);
+
+                var xyTooltip = vm.qtree.find(xy[0],xy[1]);
+                var closestNode = vm.coordToData.get(String(xyTooltip));
+
+                // If mouse cursor is close enough to the closest point show tooltip
+                if (Math.abs(xy[0]-xyTooltip[0])<=vm.scaleR(closestNode.frequency) && 
+                    Math.abs(xy[1]-xyTooltip[1])<=vm.scaleR(closestNode.frequency)) {
+
+                    // Show the tooltip only when there is nodeData found by the mouse
+                    d3.select('#tooltip')
+                      .style('opacity', 0.8)
+                      .style('top', xy[1]+1+'px') 
+                      .style('left', xy[0]+1+'px') 
+                      .html(function() { 
+                          return closestNode.name+
+                                 "</br>GOA annotations: "+closestNode.frequency+
+                                 "</br>p-value: "+closestNode.pvalue; 
+                      });
+                } else {
+                    // Hide the tooltip when there our mouse doesn't find nodeData
+                    d3.select('#tooltip')
+                      .style('opacity', 0);
+                }
+            }); 
+
         },
 
-        drawNode: function(d,Y0min,Y0max,Y1min,Y1max,w,h,context,label) {
-             let ds = this.scaleToCanvas(d,Y0min,Y0max,Y1min,Y1max,w,h);
-             context.beginPath();
-             context.fillStyle = "#9ecae1";
-             context.strokeStyle = "#000";
-             context.arc(ds[0],ds[1],3,0,2*Math.PI);
-             context.fill();
-             context.stroke();
-             context.font = "9px Helvetica";
-             context.fillStyle = "#000";
-             context.fillText(label,ds[0]+5,ds[1]+3);
+        drawNodes: function(canvas) {
+            let vm = this;
+            let context = canvas.node().getContext("2d");
+            context.clearRect(0, 0, vm.width, vm.height);
+
+            var elements = vm.custom.selectAll('custom.circle');
+
+            elements.remove();
+
+            // Draw all nodes
+            elements.each(function(d,i) { // for each virtual/custom element...
+                var node = d3.select(this);
+                context.beginPath();
+                context.fillStyle = node.attr('fillStyle'); 
+                context.strokeStyle = "#000";
+                context.arc(node.attr('x'), node.attr('y'), node.attr('radius'),0,2*Math.PI) 
+                context.fill();
+                context.stroke();
+            });
+
+            // Draw all node labels
+            // TODO: Labels are disabled because all relevant information is in the tooltip!
+            // elements.each(function(d,i) { // for each virtual/custom element...
+                // var node = d3.select(this);
+                // context.font = "9px Helvetica";
+                // context.fillStyle = "#000";
+                // context.fillText(node.attr('label'),
+                                    // parseFloat(node.attr('x'))+parseFloat(node.attr('radius')-1),
+                                    // parseFloat(node.attr('y'))-parseFloat(node.attr('radius'))+1);
+            // });
         },
 
-        // [min,max] -> [a,b]
-        // [min,max] -> [0,canvas.width]
-        // f(x) = (b-a)*(x-min) / (max-min) + a
-        // f(x) = canvas.width*x / (max-min)
-        scaleToCanvas: function(x,Y0min,Y0max,Y1min,Y1max,w,h) {
-            return [(w*(x[0]-Y0min)) / (Y0max-Y0min),(h*(x[1]-Y1min)) / (Y1max-Y1min)];
-        }
     },
-    template: '<canvas></canvas>'
+    template: '<div></div>'
 });
 
 // Custom unique function for arrays
@@ -390,12 +529,4 @@ Vue.component('download-csv', {
     },
     template: '<a v-bind:href="message" download="distmat.csv">Download {{similarityFullName}} distance matrix for {{ontology}} ({{matrixShape}})</a>'
 });
-
-// A custom function for applying map to all object properties
-const objectMap = (obj, fn) =>
-    Object.fromEntries(
-        Object.entries(obj).map(
-            ([k, v], i) => [k, fn(v, k, i)]
-        )
-    )
 
