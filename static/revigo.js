@@ -47,6 +47,10 @@ var app = new Vue({
                 console.log("revigo/watch/dataLoaded: All data successfully loaded!");
                 this.filterEnrichments(0.01);
                 this.calculateLCA();
+
+                // TODO: Reset the dataLoaded so that we can set it to true when needed
+                // Reset will again trigger this dataLoaded watch but will have no effect as else clause is empty
+                this.dataLoaded = false;
             }
         },
 
@@ -75,6 +79,17 @@ var app = new Vue({
     },
 
     methods: {
+
+        receiveDataFromChild: function(value) {
+            console.log("revigo/methods/receiveDataFromChild: Received data from input box!");
+
+            // TODO: This is not enough to start new LCA calculation!
+            this.enrichments = value;
+
+            // TODO: This is enough to start the new LCA calulation because dataLoaded
+            // is properly reset to false after loading new data
+            this.dataLoaded = true;
+        },
 
         // Select only enrichements from a current ontology space and with small p-value
         filterEnrichments: function(pvalue) {
@@ -263,6 +278,65 @@ Vue.component('progress-box', {
         }
     },
     template: '<p><span v-html="message"></span></p>'
+});
+
+Vue.component('input-box', {
+    props: [], 
+    data: function() {
+        return {
+            inputData: null,
+            examplesLinks: null
+        }
+    },
+    created: function() {
+
+        // Example enrichments dat is in csv format 
+        this.examplesLinks = ["data/revigo-enrichments1.csv",
+                              "data/revigo-enrichments2.csv",
+                              "data/revigo-enrichments3.csv"];
+
+    },
+    methods: {
+        sendDataToParent: function() {
+            console.log("input-box/methods/sendDataToParent");
+
+            // Data is in text/csv format so we have to convert it to Object
+            // TODO: Consider using Map instead of Object for enrichments data
+            var data = Object.fromEntries(
+                this.inputData
+                    .split('\n')
+                    .filter(x=>(x.substring(0,1)!='%')&&(x.substring(0,1)!=''))
+                    .map(x=>[x.split(/ |\t/)[0],Number(x.split(/ |\t/)[1])])
+            );
+            this.$emit('clicked',data);
+        },
+
+        // Fetch all needed data - DAG, term counts, enrichments
+        fetchData: function(link) {
+
+            // Needed because => functions have no defined this property
+            var vm = this; 
+
+            // TODO: Make so that example data is originally in text not json format!
+            fetch(link)
+                .then(response => response.text()) // Use .json() if enrichment data is in json format!
+                .then(data => {
+                    vm.inputData = data;
+                });
+
+        }
+
+    },
+    template: '<div>'+
+              'Examples: '+
+              '<span v-for="(link,index) of examplesLinks">'+
+              '<a class="exampleLink" @click="fetchData(link)">#{{index+1}}</a>&nbsp;'+
+              '</span>'+
+              '</br>'+
+              '<textarea v-model="inputData" cols="70" rows="10"></textarea>'+
+              '</br>'+
+              '<button @click="sendDataToParent">Submit</button>'+
+              '</div>'
 });
 
 Vue.component('scatter-plot', {

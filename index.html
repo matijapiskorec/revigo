@@ -30,6 +30,16 @@ div#tooltip {
     z-index: 1;
 }
 
+.exampleLink {
+   color: steelblue;
+   text-decoration: underline;
+
+}
+
+.exampleLink:hover {
+    cursor: pointer;
+}
+
 </style>
 
 <script>
@@ -49,6 +59,7 @@ MathJax = {
     <div id="revigo">
         <scatter-plot :distmat="distmat" :enrichments="enrichmentsSelected" :termsdata="termsData"></scatter-plot>
         <progress-box :data="loadingStatus"></progress-box>
+        <input-box @clicked="receiveDataFromChild"></input-box>
 
         <p>Choose the ontology namespace:</p>
         <input type="radio" id="bio" value="biological processes" v-model="ontologyName">
