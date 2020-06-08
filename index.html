@@ -57,9 +57,30 @@ MathJax = {
 <body>
     <h1>t-SNE embedding of GO terms</h1>
     <div id="revigo">
-        <scatter-plot :distmat="distmat" :enrichments="enrichmentsSelected" :termsdata="termsData"></scatter-plot>
-        <progress-box :data="loadingStatus"></progress-box>
+        <scatter-plot :distmat="distmat" :termsdata="termsData"></scatter-plot>
+
+        <progress-box :loadingstatus="loadingStatus" :thresholdpvalue="thresholdPvalue"></progress-box>
         <input-box @clicked="receiveDataFromChild"></input-box>
+
+        <!-- <div v-if="showExperimentSelector">
+            <br>
+            Experiment features:
+            <br>
+            <span v-for="(feature,index) of experimentFeatures">
+                <input type="checkbox" name="features" :value="feature" v-model="selectedFeatures">{{feature}}
+            </span>
+        </div> -->
+
+        <div v-if="showExperimentSelector">
+            <br>
+            Experiments:
+            <br>
+            <span v-for="(experiment,index) of experiments">
+                <input type="radio" id=experiment :value=experiment v-model="selectedExperiment">
+                <label for=experiment>{{experiment}}
+                 <br>
+            </span>
+        </div>
 
         <p>Choose the ontology namespace:</p>
         <input type="radio" id="bio" value="biological processes" v-model="ontologyName">
