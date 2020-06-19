@@ -9,6 +9,11 @@
 <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <script src="static/d3.v5.min.js"></script>
 
+<script src="static/numeric.min.js"></script>
+<script src="static/mds.js"></script>
+
+<script src="static/umap-js.min.js"></script>
+
 <link rel="icon" href="favicon.ico" type="image/x-icon" />
 
 <style>
@@ -57,7 +62,7 @@ MathJax = {
 </head>
 
 <body>
-    <h1>t-SNE embedding of GO terms</h1>
+    <h1>Non-linear embedding of GO terms</h1>
     <div id="revigo">
         <scatter-plot :distmat="distmat" :termsdata="termsData"></scatter-plot>
 
@@ -84,7 +89,7 @@ MathJax = {
             </span>
         </div>
 
-        <p>Choose the ontology namespace:</p>
+        <p>Select the ontology namespace:</p>
         <input type="radio" id="bio" value="biological processes" v-model="ontologyName">
         <label for="bio">biological processes</label>
         <br>
@@ -95,7 +100,7 @@ MathJax = {
         <label for="cell">cellular component</label>
 
         <br><br>
-        <p>Choose the semantic similarity measure</p>
+        <p>Select the semantic similarity measure</p>
         <input type="radio" id="resnik" value="resnik" v-model="similarityMeasure">
         <label for="resnik">Resnik method \( sim(t_1,t_2) = IC(t_{LCA}) \)</label>
         <br>

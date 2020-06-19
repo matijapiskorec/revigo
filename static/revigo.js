@@ -1,5 +1,3 @@
-var temp;
-
 var app = new Vue({
     
     el: '#revigo',
@@ -219,7 +217,6 @@ var app = new Vue({
                 //       Ideally the specific experiment will be selected with the menu, with the first
                 //       one selected by default. I can even have a separate function for selection.
                 var enrichments = Object.fromEntries([...value].map( x=> [x[0], x[1][0]['enrichment']] ));
-                console.log(enrichments);
 
                 // TODO: Check whether enrichment variable is used anywhere anymore!
 
@@ -663,11 +660,16 @@ Vue.component('input-box', {
         // Load local CSV file to input box
         // TODO: Consider using drag and drop (to input box, or maybe to canvas) to load local files!
         fileChange: function(e) {
+            console.log('Someone loaded a CSV file!');
 
             var vm = this;
 
             // TODO: We expect only one file, but in theory we can load multiple files as well!
             var file = e.target.files[0];
+
+            // Hack to reset the value of the file input element so that @change event will be
+            // triggered even if we decide to load the same file twice in a row (e.g. after file change).
+            e.target.value = "";
 
             const reader = new FileReader();
             reader.onload = function(event) {
@@ -708,7 +710,8 @@ Vue.component('scatter-plot', {
                 scaleY: null,
                 scaleR: null,
                 coordToData: null,
-                coordinatesReady: false
+                coordinatesReady: false,
+                embeddingType: 'tsne' // tsne, mds
             }
     },
     mounted: function() {
@@ -719,9 +722,14 @@ Vue.component('scatter-plot', {
           .style('position','relative')
           .style('width','fit-content');
 
+        // NOTE: lower() is used to position element as the first child of its parent.
+        //       As we have a form for choosing embedding type in our scatter plot component
+        //       we want all elements to be positioned above it.
+
         // Prepare canvas
         this.canvas = d3.select(this.$el)
                         .append('canvas')
+                        .lower()
                         .classed('mainCanvas', true)
                         .attr('width',this.width)
                         .attr('height',this.height);
@@ -734,16 +742,20 @@ Vue.component('scatter-plot', {
         this.scaleR = d3.scaleLog().range([4, 10]);
         this.scaleP = d3.scaleLog().range(['red','steelblue']);
         
-        d3.select(this.$el).append("div").attr("id","tooltip");
-
-        // TODO: Legend for radius 
         d3.select(this.$el).append("div")
-                           .attr("id","legendR")
+                           .lower()
+                           .attr("id","tooltip");
+
+        // Legend for p-values
+        d3.select(this.$el).append("div")
+                           .lower()
+                           .attr("id","legendP")
                            .style("float","right")
 
-        // TODO: Legend for p-values
+        // Legend for radius 
         d3.select(this.$el).append("div")
-                           .attr("id","legendP")
+                           .lower()
+                           .attr("id","legendR")
                            .style("float","right")
 
         // Put a placeholder text for empty canvas!
@@ -795,7 +807,7 @@ Vue.component('scatter-plot', {
             vm.drawNodes(vm.canvas);
         },
         distmat(newDataLoaded, oldDataLoaded) {
-            console.log("scatter-plot/watch/distmat: Distmat changed, will check for termsdata as well!!");
+            console.log("scatter-plot/watch/distmat: Distmat changed, will check for termsdata as well!");
             let vm = this;
 
             // Only when both distmat and termsdata are loaded we proceed with the watch expression
@@ -812,12 +824,25 @@ Vue.component('scatter-plot', {
                 this.drawCanvas();
 
             }
+        },
+        embeddingType(newEmbeddingType,oldEmbeddingType) {
+            console.log("scatter-plot/watch/embeddingType: Someone changed embedding type, redrawing canvas!");
+            let vm = this;
+
+            // Check that distance matrix and data on terms is defined and that they are of equal size!
+            if (this.distmat.length!=0 && this.termsdata.size!=0 &&
+                this.distmat.length==this.termsdata.size) {
+
+                vm.drawCanvas();
+            }
         }
     },
     methods: {
 
         // TODO: This function is technically not drawing canvas but just calculating all elements
         //       and their properties which have to be drawn. Actual drawing is done in drawNodes()!
+        // TODO: Also, t-SNE embedding is calculated here, although it would make sense to separate it
+        //       to a separate function in order to be able to call different embeddings.
         drawCanvas: function() {
             let vm = this;
 
@@ -825,23 +850,7 @@ Vue.component('scatter-plot', {
             console.log("scatter-plot/methods/drawCanvas: Clearing setInterval with ID: "+this.intervalID);
             clearInterval(this.intervalID);
 
-            // Calculating t-SNE
-            var opt = {}
-            opt.epsilon = 10; // learning rate 
-            opt.perplexity = 10; // roughly how many neighbors each point influences 
-            opt.dim = 2; // dimensionality of the embedding 
-
-            var tsne = new tsnejs.tSNE(opt); // create a tSNE instance
-            tsne.initDataDist(this.distmat);
-
-            // Initial iterations before we start dynamic visualization
-            for(var k = 0; k < 10; k++) {
-                tsne.step(); 
-            }
-
-            var goterms = Array.from(vm.termsdata.keys());
-            
-            // Stop the tsne calculation after 7 seconds
+            // Stop the tsne calculation after 100 seconds
             // TODO: Check for the convergence of coordinates, rather than some specified time!
             //       You can get current coordinates with tsne.getSolution()
             clearInterval(this.intervalCheckID);
@@ -849,68 +858,102 @@ Vue.component('scatter-plot', {
                 clearInterval(vm.intervalID);
             },10000);
 
-            // Returns control to the browser so that canvas can be redrawn
-            // Time interval is set to 0, with no delay between redrawing
-            this.intervalID = setInterval(function() {
-                for(var k = 0; k < 1; k++) {
-                    tsne.step(); // every time you call this, solution gets better
+            if (vm.embeddingType=='mds') {
+                console.log("scatter-plot/methods/drawCanvas: Calculating MDS embedding!");
+
+                var Y = mds.classic(this.distmat);
+                vm.updateCoordinates(Y);
+
+            } else if (vm.embeddingType=='tsne') {
+                console.log("scatter-plot/methods/drawCanvas: Calculating t-SNE embedding!");
+
+                // Calculating t-SNE
+                var opt = {}
+                opt.epsilon = 10; // learning rate 
+                opt.perplexity = 10; // roughly how many neighbors each point influences 
+                opt.dim = 2; // dimensionality of the embedding 
+
+                var tsne = new tsnejs.tSNE(opt); // create a tSNE instance
+                tsne.initDataDist(this.distmat);
+
+                // Initial iterations before we start dynamic visualization
+                for(var k = 0; k < 10; k++) {
+                    tsne.step(); 
                 }
-                Y = tsne.getSolution();
-                Y0min = Math.min(...Y.map(x=>x[0]));
-                Y0max = Math.max(...Y.map(x=>x[0]));
-                Y1min = Math.min(...Y.map(x=>x[1]));
-                Y1max = Math.max(...Y.map(x=>x[1]));
 
-                vm.scaleX.domain([Y0min, Y0max]);
-                vm.scaleY.domain([Y1min, Y1max]);
+                // Returns control to the browser so that canvas can be redrawn
+                // Time interval is set to 0, with no delay between redrawing
+                this.intervalID = setInterval(function() {
+                    for(var k = 0; k < 1; k++) { 
+                        tsne.step(); // every time you call this, solution gets better
+                    }
+                    var Y = tsne.getSolution();
+                    vm.updateCoordinates(Y);
 
-                vm.qtree = d3.quadtree()
-                  .addAll(Y.map(d=>[vm.scaleX(d[0]),vm.scaleY(d[1])]));
+                },0);
 
-                // Connect point coordinates with the information on the corresponding GO term
-                // This is only used to identify node closest to the mouse pointer with quad tree
-                vm.coordToData = new Map(Y.map( function(d,i) {
-                    
-                    // We have to stringify coordinates to use them as key, arrays won't work!
-                    var key = String([vm.scaleX(d[0]),vm.scaleY(d[1])]);
+            } else if (vm.embeddingType=='umap') {
+                console.log("scatter-plot/methods/drawCanvas: Calculating UMAP embedding!");
 
-                    // value inherits all fields from termsdata, including "frequency" and "pvalue"
+                let nNeighbors = 3;
+                let nEpochs = 400;
 
-                    // TODO: Sometimes we get an error "Cannot set property 'name' of undefined"
-                    //       This happens because termsdata updates while goterms still has old value
-                    //       Check if this is still an issue!
-                    var value = vm.termsdata.get(goterms[i]);
-                    value.name = goterms[i];
-                    value.x = Y[i][0];
-                    value.y = Y[i][1];
-                    return [key,value];
+                // For each GO term find k most similar terms and save their similarity and index
+                let neighborsDistances = this.distmat.map(function(row,i){
+                             return row.map(function(x,i){
+                                 return {'val':x,'ind':i}})
+                               .sort(function(x, y){return x.val > y.val ? 1 : x.val == y.val ? 0 : -1})
+                               .slice(0,nNeighbors)
+                });
 
-                }));
+                let umap = new UMAP({
+                  nComponents: 2,
+                  nEpochs: nEpochs,
+                  nNeighbors: nNeighbors,
+                });
 
-                // Update termsdata with the node coordinates. We will use it in binding data to visuals.
-                // Note that that this will trigger termsdata watcher!
-                vm.termsdata = new Map([...vm.termsdata].map( function(d) {
-                    var key = d[0];
-                    var value = d[1];
-                    var indexOfGOterm = goterms.indexOf(d[0]);
-                    value['x'] = Y[indexOfGOterm][0];
-                    value['y'] = Y[indexOfGOterm][1];
-                    value['name'] = d[0];
-                    return [key,value];
-                }));
+                // Indices of neirest neighbors
+                let knnIndices = neighborsDistances.map(function(x,i){
+                    return x.map(function(x,i){
+                        return x['ind']});
+                });
 
-                // Now the data coordinates are ready and we will check this variable before actual drawing.
-                vm.coordinatesReady = true;
+                // Distances to the neirest neighbors
+                let knnDistances = neighborsDistances.map(function(x,i){
+                    return x.map(function(x,i){
+                        return x['val']});
+                });
 
-                // Bind data to visual elements (does not draw anything yet!)
-                vm.bindDataToVisuals();
+                // Dummy data which we need to initialize UMAP, but will never actually be used
+                // as we use data on neirest neighbors instead!
+                let data = new Array(neighborsDistances.length).fill([1,2,3,4,2,4]);
 
-                // Draw data that was bound to visual elements
-                vm.drawNodes(vm.canvas);
+                // Set precomputed knn indices and distances and initialize UMAP with dummy data
+                umap.setPrecomputedKNN(knnIndices,knnDistances);
+                umap.initializeFit(data);
 
-            },0);
+                // Initial iterations before we start dynamic visualization
+                for (let i = 0; i < 10; i++) {
+                  umap.step();
+                }
 
+                // Returns control to the browser so that canvas can be redrawn
+                // Time interval is set to 0, with no delay between redrawing
+                // NOTE: The same intervalID is used for t-sne embedding as well, but they
+                //       are never rendered at the same time so I guess this is ok!
+                this.intervalID = setInterval(function() {
+                    for(var k = 0; k < 1; k++) { 
+                        umap.step(); // every time you call this, solution gets better
+                    }
+                    let Y = umap.getEmbedding();
+                    vm.updateCoordinates(Y);
 
+                },0);
+
+            }
+
+            // TODO: Maybe separate this is another function? This makes sense if we will reuse code for
+            //       tooltip in different contexts, for example when drawing scatter plot of experiments.
             d3.select('.mainCanvas').on('mousemove', function() {
 
                 var xy = d3.mouse(this);
@@ -942,6 +985,66 @@ Vue.component('scatter-plot', {
                       .style('opacity', 0);
                 }
             }); 
+
+        },
+
+        updateCoordinates: function(Y) {
+
+            let vm = this;
+
+            let goterms = Array.from(vm.termsdata.keys());
+
+            let Y0min = Math.min(...Y.map(x=>x[0]));
+            let Y0max = Math.max(...Y.map(x=>x[0]));
+            let Y1min = Math.min(...Y.map(x=>x[1]));
+            let Y1max = Math.max(...Y.map(x=>x[1]));
+
+            vm.scaleX.domain([Y0min, Y0max]);
+            vm.scaleY.domain([Y1min, Y1max]);
+
+            vm.qtree = d3.quadtree()
+              .addAll(Y.map(d=>[vm.scaleX(d[0]),vm.scaleY(d[1])]));
+
+            // Connect point coordinates with the information on the corresponding GO term
+            // This is only used to identify node closest to the mouse pointer with quad tree
+            vm.coordToData = new Map(Y.map( function(d,i) {
+                
+                // We have to stringify coordinates to use them as key, arrays won't work!
+                let key = String([vm.scaleX(d[0]),vm.scaleY(d[1])]);
+
+                // value inherits all fields from termsdata, including "frequency" and "pvalue"
+
+                // TODO: Sometimes we get an error "Cannot set property 'name' of undefined"
+                //       This happens because termsdata updates while goterms still has old value
+                //       Check if this is still an issue!
+                let value = vm.termsdata.get(goterms[i]);
+                value.name = goterms[i];
+                value.x = Y[i][0];
+                value.y = Y[i][1];
+                return [key,value];
+
+            }));
+
+            // Update termsdata with the node coordinates. We will use it in binding data to visuals.
+            // Note that that this will trigger termsdata watcher!
+            vm.termsdata = new Map([...vm.termsdata].map( function(d) {
+                var key = d[0];
+                var value = d[1];
+                var indexOfGOterm = goterms.indexOf(d[0]);
+                value['x'] = Y[indexOfGOterm][0]; // TODO: Warning - Cannot read property '0' of undefined!
+                value['y'] = Y[indexOfGOterm][1];
+                value['name'] = d[0];
+                return [key,value];
+            }));
+
+            // Now the data coordinates are ready and we will check this variable before actual drawing.
+            vm.coordinatesReady = true;
+
+            // Bind data to visual elements (does not draw anything yet!)
+            vm.bindDataToVisuals();
+
+            // Draw data that was bound to visual elements
+            vm.drawNodes(vm.canvas);
 
         },
 
@@ -990,7 +1093,6 @@ Vue.component('scatter-plot', {
 
             // Draw legend for GOA annotations (circle radius)
             vm.drawRlegend("#legendR", vm.scaleR);
-
 
             // Check whether coordinates of the nodes are ready
             if (vm.coordinatesReady) {
@@ -1049,24 +1151,13 @@ Vue.component('scatter-plot', {
             .domain(colorscale.domain());
 
           // Generate image with continuous scale colors. If too slow see faster solution bellow!
+          // http://bl.ocks.org/mbostock/048d21cf747371b11884f75ad896e5a5
           // http://stackoverflow.com/questions/4899799
           //       /whats-the-best-way-to-set-a-single-pixel-in-an-html5-canvas   
           d3.range(legendheight).forEach(function(i) {
             ctx.fillStyle = colorscale(legendscale.invert(i));
             ctx.fillRect(0,i,1,1);
           });
-
-          // TODO: Possibly a faster way to generate scale image.
-          //       http://bl.ocks.org/mbostock/048d21cf747371b11884f75ad896e5a5
-          // var image = ctx.createImageData(1, legendheight);
-          // d3.range(legendheight).forEach(function(i) {
-            // var c = d3.rgb(colorscale(legendscale.invert(i)));
-            // image.data[4*i] = c.r;
-            // image.data[4*i + 1] = c.g;
-            // image.data[4*i + 2] = c.b;
-            // image.data[4*i + 3] = 255;
-          // });
-          // ctx.putImageData(image, 0, 0);
 
           var legendaxis = d3.axisRight()
             .scale(legendscale)
@@ -1159,7 +1250,18 @@ Vue.component('scatter-plot', {
             });
         }
     },
-    template: '<div></div>'
+    // template: '<div></div>'
+    template:
+        '<div>'+
+            '<form>'+
+                '<input type="radio" id="tsne" value="tsne" v-model="embeddingType">'+
+                '<label for="tsne">t-SNE</label>'+
+                '<input type="radio" id="mds" value="mds" v-model="embeddingType">'+
+                '<label for="mds">MDS</label>'+
+                '<input type="radio" id="umap" value="umap" v-model="embeddingType">'+
+                '<label for="umap">UMAP</label>'+
+            '</form>'+
+        '</div>'
 });
 
 // Custom unique function for arrays
