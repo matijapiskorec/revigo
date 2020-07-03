@@ -702,6 +702,7 @@ Vue.component('scatter-plot', {
                 canvas: null,
                 width: 500, 
                 height: 500, 
+                margin: {top: 15, right: 15, bottom: 15, left: 15}, // TODO: We also have legend margin!
                 intervalID: null,
                 intervalCheckID: null,
                 custom: null,
@@ -737,8 +738,10 @@ Vue.component('scatter-plot', {
 		var customBase = document.createElement('custom');
 		this.custom = d3.select(customBase); 
 
-        this.scaleX = d3.scaleLinear().range([0, this.width]);
-        this.scaleY = d3.scaleLinear().range([0, this.height]);
+        // Set margins for scatter plot
+        this.scaleX = d3.scaleLinear().range([this.margin.left, this.width-this.margin.right]);
+        this.scaleY = d3.scaleLinear().range([this.margin.top, this.height-this.margin.bottom]);
+
         this.scaleR = d3.scaleLog().range([4, 10]);
         this.scaleP = d3.scaleLog().range(['red','steelblue']);
         
