@@ -15,8 +15,6 @@ var app = new Vue({
         // biological_processes, cellular component, molecular function
         ontologyName: "biological processes", 
         lcaWorker: [],
-        canvas: [],
-        context: [],
         termsToId: [],
         results: [],
         distmat: [], 
@@ -36,7 +34,9 @@ var app = new Vue({
         selectedExperiment: [],
         experimentEnrichments: [],
         multipleExperimentSetting: false,
-        thresholdPvalue: 0.01
+        thresholdPvalue: 0.01,
+        embeddingType: 'tsne', // tsne, mds, umap, biplot
+        experimentDataTable: []
     },
 
     created: function() {
@@ -68,6 +68,9 @@ var app = new Vue({
 
             if (newDataLoaded) {
                 console.log("revigo/watch/dataLoaded: All data successfully loaded!");
+
+                // TODO: Filtering procedure and LCA calculation are coupled, although they should not be!
+                //       For example, when we have master data table and calculating PCA biplot!
                 this.filterEnrichments(this.thresholdPvalue);
                 this.calculateLCA();
 
@@ -86,8 +89,10 @@ var app = new Vue({
             } else if (newOntologyName=="cellular component") {
                 this.dag = this.dagCell;
             }
-            this.filterEnrichments(this.thresholdPvalue);
 
+            // TODO: Filtering procedure and LCA calculation are coupled, although they should not be!
+            //       For example, when we have master data table and calculating PCA biplot!
+            this.filterEnrichments(this.thresholdPvalue);
             this.calculateLCA();
         },
 
@@ -323,6 +328,21 @@ var app = new Vue({
                                       'frequency': vm.terms[x[0]] || 1,
                                       'selected': x[1].hasOwnProperty(vm.experiments[0])} ] )
                     );
+
+                // TODO: Technically we only need this experiment data table when we are plotting
+                //       PCA biplot, it is not needed for regular GO term embeddings (t-SNE, MDS, UMAP).
+                //       But for now we are constructing it regardless of this!
+
+                // TODO: In the case when we are plotting PCA biplot we don't need semantic similarities
+                //       at all, so it makes sense to separate these two cases so that we don't have
+                //       redundant calculations!
+
+                // Experiment data table which will be used for PCA biplot:
+                // - rows are GO terms
+                // - column are experiments
+                // - elements are p-values
+                this.experimentDataTable = [...this.experimentEnrichmentsFiltered]
+                    .map( x => vm.experiments.map( e => e in x[1] ? x[1][e] : 1.0 ) );  
 
             }
             
@@ -660,7 +680,7 @@ Vue.component('input-box', {
         // Load local CSV file to input box
         // TODO: Consider using drag and drop (to input box, or maybe to canvas) to load local files!
         fileChange: function(e) {
-            console.log('Someone loaded a CSV file!');
+            console.log('CSV file loaded!');
 
             var vm = this;
 
@@ -696,10 +716,12 @@ Vue.component('input-box', {
 });
 
 Vue.component('scatter-plot', {
-    props: ["distmat","termsdata"],
+    // props: ["distmat","termsdata"],
+    props: ["distmat","termsdata","embeddingtype","experimentdatatable","experiments"],
         data: function () {
             return {
                 canvas: null,
+                context: null,
                 width: 500, 
                 height: 500, 
                 margin: {top: 15, right: 15, bottom: 15, left: 15}, // TODO: We also have legend margin!
@@ -712,7 +734,7 @@ Vue.component('scatter-plot', {
                 scaleR: null,
                 coordToData: null,
                 coordinatesReady: false,
-                embeddingType: 'tsne' // tsne, mds
+                loadings: null // PCA loadings for the PCA biplot
             }
     },
     mounted: function() {
@@ -763,12 +785,13 @@ Vue.component('scatter-plot', {
 
         // Put a placeholder text for empty canvas!
 
-        let context = this.canvas.node().getContext("2d");
-        context.clearRect(0, 0, this.width, this.height);
+        // let context = this.canvas.node().getContext("2d");
+        this.context = this.canvas.node().getContext("2d");
+        this.context.clearRect(0, 0, this.width, this.height);
 
-        context.font = "24px Helvetica";
-        context.fillStyle = "#777";
-        context.fillText('Please load enrichment data! :-)',0.2*this.width,0.5*this.height);
+        this.context.font = "24px Helvetica";
+        this.context.fillStyle = "#777";
+        this.context.fillText('Please load enrichment data! :-)',0.2*this.width,0.5*this.height);
 
     },
     watch: {
@@ -778,8 +801,6 @@ Vue.component('scatter-plot', {
         // This watch is not triggered if we modify just the pvalue in termsdata - we have to reassign
         // the whole variable! 
         termsdata(newTermsdata,oldTermsdata) {
-            // console.log("scatter-plot/watch/termsdata: Someone changed termsdata and now I react!");
-
             let vm = this;
 
             // Set scale for radius which depends on the frequency of newly loaded GO terms
@@ -808,6 +829,26 @@ Vue.component('scatter-plot', {
 
             // Draw data that was bound to visual elements
             vm.drawNodes(vm.canvas);
+
+            // If PCA biplot is selected as embedding you should make sure that arrows are drawn at the end!
+            // Without this the last call to drawNodes would erase the arrows from the plot!
+            if (vm.embeddingtype=='biplot') {
+                console.log('scatter-plot/watch/termsdata: Drawing PCA biplot arrows!');
+                this.loadings.forEach(function(x){
+                    drawLineWithArrows(vm.context,
+                                       0.5*vm.width,0.5*vm.height,
+                                       vm.scaleX(x[0]),vm.scaleY(x[1]),
+                                       5,8,false,true);
+                });
+
+                // TODO: Add labels for arrows loadings as well!
+                //       Problem is that the labels are shown only for one experiment!?
+                zip(this.loadings,this.experiments).forEach(function(x){
+                    vm.context.font = "10px Arial";
+                    vm.context.fillStyle = "black";
+                    vm.context.fillText(x[1], vm.scaleX(x[0][0])+5, vm.scaleY(x[0][1])+5);
+                });
+            }
         },
         distmat(newDataLoaded, oldDataLoaded) {
             console.log("scatter-plot/watch/distmat: Distmat changed, will check for termsdata as well!");
@@ -828,8 +869,9 @@ Vue.component('scatter-plot', {
 
             }
         },
-        embeddingType(newEmbeddingType,oldEmbeddingType) {
-            console.log("scatter-plot/watch/embeddingType: Someone changed embedding type, redrawing canvas!");
+        // embeddingType(newEmbeddingType,oldEmbeddingType) {
+        embeddingtype(newEmbeddingType,oldEmbeddingType) {
+            console.log("scatter-plot/watch/embeddingType: Embedding type changed, redrawing canvas!");
             let vm = this;
 
             // Check that distance matrix and data on terms is defined and that they are of equal size!
@@ -861,13 +903,14 @@ Vue.component('scatter-plot', {
                 clearInterval(vm.intervalID);
             },10000);
 
-            if (vm.embeddingType=='mds') {
+            // if (vm.embeddingType=='mds') {
+            if (vm.embeddingtype=='mds') {
                 console.log("scatter-plot/methods/drawCanvas: Calculating MDS embedding!");
 
                 var Y = mds.classic(this.distmat);
                 vm.updateCoordinates(Y);
 
-            } else if (vm.embeddingType=='tsne') {
+            } else if (vm.embeddingtype=='tsne') {
                 console.log("scatter-plot/methods/drawCanvas: Calculating t-SNE embedding!");
 
                 // Calculating t-SNE
@@ -895,7 +938,7 @@ Vue.component('scatter-plot', {
 
                 },0);
 
-            } else if (vm.embeddingType=='umap') {
+            } else if (vm.embeddingtype=='umap') {
                 console.log("scatter-plot/methods/drawCanvas: Calculating UMAP embedding!");
 
                 let nNeighbors = 3;
@@ -952,6 +995,29 @@ Vue.component('scatter-plot', {
                     vm.updateCoordinates(Y);
 
                 },0);
+
+            } else if (vm.embeddingtype=='biplot') {
+                console.log("scatter-plot/methods/drawCanvas: Calculating PCA biplot embedding!");
+
+                // TODO: Experiment data table is calculated in the main app!
+
+                // TODO: revigo.js:1100 Uncaught TypeError: Cannot read property '0' of undefined
+                //       This happens even if currently selected embedding type is not biplot?!
+                // PCA analysis - https://github.com/bitanath/pca
+                let vectors = PCA.getEigenVectors(this.experimentdatatable);
+
+                this.loadings = zip(vectors[0].vector,vectors[1].vector);
+
+                // Adjusted data - GO terms projected to PCA components
+                let adData = PCA.computeAdjustedData(this.experimentdatatable,vectors[0],vectors[1]);
+
+                // Coordinates need to be in [[x,y],...] and not in [[x,...],[y,...]]
+                var Y = zip(adData.adjustedData[0],adData.adjustedData[1]); 
+                vm.updateCoordinates(Y);
+
+                // TODO: Ideally, arrows for the biplot would be drawn here, but then they are overdrawn
+                //       by the drawNodes in the termsdata watcher! So arrows are drawn there!
+                //       The PCA loadings need to be accessible within the whole component for this to work!
 
             }
 
@@ -1100,8 +1166,9 @@ Vue.component('scatter-plot', {
             // Check whether coordinates of the nodes are ready
             if (vm.coordinatesReady) {
 
-                let context = canvas.node().getContext("2d");
-                context.clearRect(0, 0, vm.width, vm.height);
+                // let context = canvas.node().getContext("2d");
+                // this.context = canvas.node().getContext("2d");
+                this.context.clearRect(0, 0, vm.width, vm.height);
 
                 var elements = vm.custom.selectAll('custom.circle');
 
@@ -1110,13 +1177,14 @@ Vue.component('scatter-plot', {
                 // Draw all nodes
                 elements.each(function(d,i) { // for each virtual/custom element...
                     var node = d3.select(this);
-                    context.beginPath();
-                    context.fillStyle = node.attr('fillStyle'); 
-                    context.strokeStyle = node.attr('strokeStyle'); 
-                    context.arc(node.attr('x'), node.attr('y'), node.attr('radius'),0,2*Math.PI) 
-                    context.fill();
-                    context.stroke();
+                    vm.context.beginPath();
+                    vm.context.fillStyle = node.attr('fillStyle'); 
+                    vm.context.strokeStyle = node.attr('strokeStyle'); 
+                    vm.context.arc(node.attr('x'), node.attr('y'), node.attr('radius'),0,2*Math.PI) 
+                    vm.context.fill();
+                    vm.context.stroke();
                 });
+
             }
 
         },
@@ -1253,18 +1321,7 @@ Vue.component('scatter-plot', {
             });
         }
     },
-    // template: '<div></div>'
-    template:
-        '<div>'+
-            '<form>'+
-                '<input type="radio" id="tsne" value="tsne" v-model="embeddingType">'+
-                '<label for="tsne">t-SNE</label>'+
-                '<input type="radio" id="mds" value="mds" v-model="embeddingType">'+
-                '<label for="mds">MDS</label>'+
-                '<input type="radio" id="umap" value="umap" v-model="embeddingType">'+
-                '<label for="umap">UMAP</label>'+
-            '</form>'+
-        '</div>'
+    template: '<div></div>'
 });
 
 // Custom unique function for arrays
@@ -1300,4 +1357,38 @@ Vue.component('download-csv', {
 
 // Custom zip function
 const zip = (arr1, arr2) => arr1.map((k, i) => [k, arr2[i]]); // custom zip function
+
+// x0,y0: the line's starting point
+// x1,y1: the line's ending point
+// width: the distance the arrowhead perpendicularly extends away from the line
+// height: the distance the arrowhead extends backward from the endpoint
+// arrowStart: true/false directing to draw arrowhead at the line's starting point
+// arrowEnd: true/false directing to draw arrowhead at the line's ending point
+
+function drawLineWithArrows(ctx,x0,y0,x1,y1,aWidth,aLength,arrowStart,arrowEnd){
+    var dx=x1-x0;
+    var dy=y1-y0;
+    var angle=Math.atan2(dy,dx);
+    var length=Math.sqrt(dx*dx+dy*dy);
+
+    ctx.translate(x0,y0);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(0,0);
+    ctx.lineTo(length,0);
+    if(arrowStart){
+        ctx.moveTo(aLength,-aWidth);
+        ctx.lineTo(0,0);
+        ctx.lineTo(aLength,aWidth);
+    }
+    if(arrowEnd){
+        ctx.moveTo(length-aLength,-aWidth);
+        ctx.lineTo(length,0);
+        ctx.lineTo(length-aLength,aWidth);
+    }
+
+    ctx.strokeStyle = "black"; 
+    ctx.stroke();
+    ctx.setTransform(1,0,0,1,0,0);
+}
 

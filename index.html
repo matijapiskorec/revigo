@@ -9,10 +9,12 @@
 <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <script src="static/d3.v5.min.js"></script>
 
-<script src="static/numeric.min.js"></script>
-<script src="static/mds.js"></script>
+<script src="static/numeric.min.js"></script> <!-- https://github.com/sloisel/numeric -->
+<script src="static/mds.js"></script> <!-- https://github.com/benfred/mds.js/tree/master -->
+<!-- <script src="static/ml-pca.js"></script> --> <!-- https://github.com/mljs/pca -->
+<script src="static/pca.min.js"></script> <!-- https://github.com/bitanath/pca -->
 
-<script src="static/umap-js.min.js"></script>
+<script src="static/umap-js.min.js"></script> <!-- https://github.com/PAIR-code/umap-js -->
 
 <link rel="icon" href="favicon.ico" type="image/x-icon" />
 
@@ -64,9 +66,22 @@ MathJax = {
 <body>
     <h1>Non-linear embedding of GO terms</h1>
     <div id="revigo">
-        <scatter-plot :distmat="distmat" :termsdata="termsData"></scatter-plot>
+
+        <scatter-plot :distmat="distmat" :termsdata="termsData" :embeddingtype="embeddingType" :experimentdatatable="experimentDataTable" :experiments="experiments"></scatter-plot>
 
         <progress-box :loadingstatus="loadingStatus" :thresholdpvalue="thresholdPvalue"></progress-box>
+
+        <form>
+            <input type="radio" id="tsne" value="tsne" v-model="embeddingType">
+            <label for="tsne">t-SNE</label>
+            <input type="radio" id="mds" value="mds" v-model="embeddingType">
+            <label for="mds">MDS</label>
+            <input type="radio" id="umap" value="umap" v-model="embeddingType">
+            <label for="umap">UMAP</label>
+            <input v-if="showExperimentSelector" type="radio" id="biplot" value="biplot" v-model="embeddingType">
+            <label v-if="showExperimentSelector" for="umap">PCA biplot</label>
+        </form>
+
         <input-box @clicked="receiveDataFromChild"></input-box>
 
         <!-- <div v-if="showExperimentSelector">
