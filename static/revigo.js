@@ -3,22 +3,18 @@ var app = new Vue({
     el: '#revigo',
 
     data: {
-        message: 'Hello Vue!',
+
+        // Input data
         dag: [],
         dagBio: [],
         dagMol: [],
         dagCell: [],
         terms: [],
         enrichments: [],
+
+        // Status of the application
         dataLoaded: false, // for user data (enrichments)
         basicDataLoaded: false, // for server data (gene ontology and annotations)
-        // biological_processes, cellular component, molecular function
-        ontologyName: "biological processes", 
-        lcaWorker: [],
-        termsToId: [],
-        results: [],
-        distmat: [], 
-        termsData: [], // data on selected GO terms
         loadingStatus: {'start': true, 
                         'loading': true, 
                         'length': 0, 
@@ -26,17 +22,42 @@ var app = new Vue({
                         't1': 0, 
                         'label': '', 
                         'warning':''}, 
-        similarityMeasure: 'resnik', // resnik, lin, rel, jiang
-        showExperimentSelector: false,
+        umapdisabled: false, // for disabling umap radio button if needed
+
+        // Intermediary data
+        lcaWorker: [],
+        termsToId: [],
+        results: [],
         experimentFeatures: [],
         selectedFeatures: [],
         experiments: [],
         selectedExperiment: [],
+        enrichmentsFiltered: [],
         experimentEnrichments: [],
-        multipleExperimentSetting: false,
-        thresholdPvalue: 0.01,
-        embeddingType: 'tsne', // tsne, mds, umap, biplot
-        experimentDataTable: []
+        experimentEnrichmentsFiltered: [],
+        experimentDataTable: [],
+
+        // Calculated data
+        distmat: [], 
+        termsData: [], // data on selected GO terms
+        experimentData: [], // data on experiments
+        nodeData: [], // data on nodes which will be visualized
+        simGICmatrix: [],
+        experimentHierarchy: [],
+        semanticSimilarityMatrix: [],
+
+        // Visualization type
+        multipleExperimentSetting: false, // Defaults to GO-GO visualization context
+        visualizationContext: 'initial', // go-go, go-ex, ex-ex, initial
+        embeddingType: '', // tsne, mds, umap, biplot, hierarchical
+
+        // Visualization parameters
+        similarityMeasure: 'resnik', // resnik, lin, rel, jiang
+        selectedPvalue: 0.01, // for SimGIC
+        thresholdPvalue: 0.01, // TODO: Should be replaced with REVIGO redundancy elimination algorithm!
+        pvalueThresholds: [0.01,0.05,0.1,0.5], // p-value thresholds for SimGIC
+        ontologyName: "biological processes" // biological processes, cellular component, molecular function
+
     },
 
     created: function() {
@@ -59,7 +80,7 @@ var app = new Vue({
                 console.log("revigo/watch/basicDataLoaded: Loaded basic data!");
 
                 // A hacky way to force mounting of scatter plot.
-                this.termsData = [];
+                this.nodeData = [];
             }
         },
 
@@ -69,19 +90,30 @@ var app = new Vue({
             if (newDataLoaded) {
                 console.log("revigo/watch/dataLoaded: All data successfully loaded!");
 
-                // TODO: Filtering procedure and LCA calculation are coupled, although they should not be!
-                //       For example, when we have master data table and calculating PCA biplot!
-                this.filterEnrichments(this.thresholdPvalue);
+                this.filterEnrichmentsDAG();
+                this.filterEnrichmentsPvalue() // TODO: To be replaced with Revigo's algorithm!
+                this.updateTermsData();
+
+                // TODO: We should consider calculating LCA only when user chooses the embedding type!
                 this.calculateLCA();
 
-                // TODO: Reset the dataLoaded so that we can set it to true when needed
+                // Reset the dataLoaded so that we can set it to true when needed
                 // Reset will again trigger this dataLoaded watch but will have no effect as else clause is empty
                 this.dataLoaded = false;
+
+                // Reset the embedding type.
+                this.embeddingType = '';
+
+                // Change the visualization context from initial to GO-GO
+                this.visualizationContext = 'go-go';
             }
         },
 
         ontologyName: function(newOntologyName, oldOntologyName) {
+
+            var vm = this; 
             console.log("revigo/watch/ontologyName: Changed value to "+newOntologyName);
+
             if (newOntologyName=="biological processes") {
                 this.dag = this.dagBio;
             } else if (newOntologyName=="molecular function") {
@@ -90,10 +122,38 @@ var app = new Vue({
                 this.dag = this.dagCell;
             }
 
-            // TODO: Filtering procedure and LCA calculation are coupled, although they should not be!
-            //       For example, when we have master data table and calculating PCA biplot!
-            this.filterEnrichments(this.thresholdPvalue);
-            this.calculateLCA();
+            this.filterEnrichmentsDAG();
+            this.filterEnrichmentsPvalue() // TODO: To be replaced with Revigo's algorithm!
+            this.updateTermsData();
+
+            if (vm.visualizationContext=='go-go') {
+
+                // Calculation of distance matrix is automatically called in the watcher for results from LCA!
+                vm.calculateLCA(); 
+
+                // TODO: Check if this would be better put in filterEnrichments, where we already have it
+                //       for a single experiment setting!
+                vm.nodeData = vm.termsData; 
+            }
+
+            if (vm.visualizationContext=='go-ex') {
+                vm.nodeData = vm.termsData;
+            }
+
+            // TODO: For this case to work properly I first have to decouple filtering by ontology space from
+            //       filtering by p-value. The SimGIC algorithm is doing selection of enriched/non-enriched
+            //       terms and so it makes sense to pass all non-redundat GO terms. The redundancy will be
+            //       calculated with Revigo's algorithm, on a specific ontology space.
+            if (vm.visualizationContext=='ex-ex') {
+
+                vm.calculateSimGIC();
+                vm.passInformationOnExperiments();
+
+                if (vm.embeddingType=='hierarchical') {
+                    vm.calculateHierarchicalClustering();
+                } 
+            }
+
         },
 
         similarityMeasure: function(newSimilarityMeasure, oldSimilarityMeasure) {
@@ -135,10 +195,114 @@ var app = new Vue({
                 return [key,value];
             }));
 
+            vm.nodeData = vm.termsData;
+
+        },
+
+        // p-value threshold for SimGIC calculation
+        // SimGIC is used as a similarity measure between experiments
+        // TODO: How to trigger this watcher for the default p-value which is preselected!
+        selectedPvalue: function(newSelectedPvalue, oldSelectedPvalue) {
+            var vm = this;
+            console.log('Somebody selected a new p-value:' + vm.selectedPvalue);
+
+            if (vm.visualizationContext=='ex-ex') {
+
+                // Calculate SimGIC with the chosen p-value
+                // This will also update t-SNE, MDS and UMAP embeddings automatically if they are selected
+                vm.calculateSimGIC();
+                vm.passInformationOnExperiments();
+
+                // In case hierarchical clustering is needed, calculate it here
+                if (vm.embeddingType=='hierarchical') {
+                    vm.calculateHierarchicalClustering();
+                } 
+            }
+
+        },
+
+        embeddingType: function(newEmbeddingType, oldEmbeddingType) {
+            var vm = this;
+            console.log("revigo/watch/embeddingType: Someone changed embedding type to " + vm.embeddingType);
+
+            // Do nothing if embedding type is empty!
+            if (vm.embeddingType=='') {
+                return;
+            }
+
+            if (vm.visualizationContext=='ex-ex') {
+                console.log('revigo/watch/embeddingType: Visualize experiment embedding in EX-EX context! ');
+
+                vm.calculateSimGIC();
+                vm.passInformationOnExperiments();
+
+                // Hierarchical clustering is only available in multiple experiments visualization context,
+                // so we don't have to explicitly check for the visualization context!
+                if (vm.embeddingType=='hierarchical') {
+                    vm.calculateHierarchicalClustering();
+                } 
+
+            }
+
+            // TODO: If the embedding type changes back to GO-GO, check whether semantic similarity is
+            //       already calculated and if yes, assign semanticSimilarityMatrix to the distmat which
+            //       will then be passed to the scatter-plot component.
+
+        },
+
+        visualizationContext: function(newVisualizationContext, oldVisualizationContext) {
+            let vm = this;
+            console.log("revigo/watch/visualizationContext: Someone changed visualization context to "+
+                vm.visualizationContext);
+
+            // Reset the embedding type when you switch the visualization context.
+            vm.embeddingType = '';
+
+            if (vm.visualizationContext=='go-go') {
+
+                // I need this to set results properly, because they are used in calculateDistanceMatrix!
+                vm.calculateLCA();
+
+                vm.nodeData = vm.termsData;
+
+                // Typeset the MathJax equations in semantic similarity menu after it is revealed!
+                this.$nextTick(function() {
+                    MathJax.typeset();
+                 });
+
+            }
+
+            if (vm.visualizationContext=='go-ex') {
+                vm.nodeData = vm.termsData;
+            }
+
+            if (vm.visualizationContext=='ex-ex') {
+
+                // TODO: We calculate SimGIC as soon as we switch to EX-EX visualization context!
+                //       We do almost the same thing in the watcher for embedding type, check that!
+
+                // Calculate SimGIC as soon as the context is switched!
+                vm.calculateSimGIC();
+                vm.passInformationOnExperiments();
+
+            }
         }
+
     },
 
     methods: {
+
+        receiveStatusFromScatterPlot: function(statusMessage) {
+            let vm = this;
+            console.log("revigo/methods/receiveStatusFromScatterPlot: "+statusMessage.message);
+
+            if (statusMessage.umapdisabled) {
+                vm.umapdisabled = true;
+            } else {
+                vm.umapdisabled = false;
+            }
+
+        },
 
         receiveDataFromChild: function(value) {
 
@@ -164,10 +328,9 @@ var app = new Vue({
                 console.log("revigo/methods/receiveDataFromChild: Received data for a single experiment");
 
                 // Hide experiment selector
-                this.showExperimentSelector = false;
+                this.multipleExperimentSetting = false;
 
                 // TODO: Hack to convert Map back to Object, ideally enrichments should be in one or the other!
-                // this.enrichments = value;
                 this.enrichments = Object.fromEntries([...value]);
 
                 this.dataLoaded = true;
@@ -178,7 +341,7 @@ var app = new Vue({
                 console.log("revigo/methods/receiveDataFromChild: Received data for multiple experiments");
 
                 // Show experiment selector
-                this.showExperimentSelector = true;
+                this.multipleExperimentSetting = true;
 
                 // Experiment features are extracted from the first experiment of the first GO term
                 // TODO: Consider whether column labels can be extracted and passed earlier!
@@ -266,49 +429,55 @@ var app = new Vue({
                                                     'non-zero p-value!';
                 }
 
-                // Pass the enrichments from mutliple experiments to be visualized
+                // Pass the enrichments from multiple experiments to be visualized
                 this.enrichments = enrichments;
                 this.dataLoaded = true;
 
             }
         },
 
-        // Select only enrichements from a current ontology space and with small p-value
-        // TODO: Later we can use the same function for Fran's redundancy reduction algorithm
-        //       where GO terms which are too general are filtered out.
-        filterEnrichments: function(pvalue) {
+        filterEnrichmentsDAG: function() {
             var vm = this; 
-
-            // Single experiment setting
-            var enrichmentsSelected = Object.entries(this.enrichments)
-                                            .filter( x => this.dag.hasOwnProperty(x[0]) )
-                                            .filter( x => x[1] < this.thresholdPvalue);
+            console.log("revigo/methods/filterEnrichmentsDAG: Selecting terms from specific ontology space!");
 
             if (!this.multipleExperimentSetting) {
 
-                // Create one dataset with all information on GO terms which will be passed to visuals!
-                this.termsData = new Map(enrichmentsSelected.map( function(d,i) {
-                    var key = d[0];
-                    var value = d[1];
-                    return [key,
-                            {'pvalue': value, 
-                             'frequency': vm.terms[d[0]] || 1,
-                             'selected': true}
-                    ];
-                }));
+                // Single experiment setting
+                this.enrichmentsFiltered = Object.entries(this.enrichments)
+                                                 .filter( x => this.dag.hasOwnProperty(x[0]) );
 
             } else {
-
-                // In the multiple experiment setup the first experiment is selected by default,
-                // but we draw all GO terms which satisfy p-value threshold, regardless of whether
-                // they appear in the first experiment, although the missing GO terms will be drawn
-                // as transparent.
 
                 // Store all p-values of all experiments but only those that are above p-value threshold. 
                 // All of these GO terms will be embedded, but only some will be actually visible!
                 this.experimentEnrichmentsFiltered = 
                     new Map( [...vm.experimentEnrichments]
                         .filter( x => vm.dag.hasOwnProperty(x[0]) ) // make sure GO term exists in our DAG
+                    );
+                
+            }
+
+            // TODO: Will run manually outside of this function!
+            // vm.updateTermsData();
+            
+        },
+
+        filterEnrichmentsPvalue: function() {
+            var vm = this; 
+            console.log("revigo/methods/filterEnrichmentsPvalue: Filtering terms by p-value!");
+
+            if (!this.multipleExperimentSetting) {
+
+                // Single experiment setting
+                this.enrichmentsFiltered = vm.enrichmentsFiltered 
+                                             .filter( x => x[1] < this.thresholdPvalue);
+
+            } else {
+
+                // Store all p-values of all experiments but only those that are above p-value threshold. 
+                // All of these GO terms will be embedded, but only some will be actually visible!
+                this.experimentEnrichmentsFiltered = 
+                    new Map( [...vm.experimentEnrichmentsFiltered]
                         .map( x => [ x[0],
                                      Object.fromEntries(
                                         Object.entries(x[1]).filter(y => y[1] < vm.thresholdPvalue ) 
@@ -317,6 +486,36 @@ var app = new Vue({
                         .filter( x => Object.keys(x[1]).length != 0 )
                     );
                 
+            }
+
+            // TODO: Will run manually outside of this function!
+            // vm.updateTermsData();
+            
+        },
+
+        updateTermsData: function() {
+            var vm = this; 
+            console.log("revigo/methods/updateTermsData: Updating terms data!");
+
+            if (!this.multipleExperimentSetting) {
+
+                // Create one dataset with all information on GO terms which will be passed to visuals!
+                // GO terms with missing annotations are assigned one annotation by default
+                this.termsData = new Map(this.enrichmentsFiltered.map( function(d,i) {
+                    var key = d[0];
+                    var value = d[1];
+                    return [key,
+                            {'pvalue': value, 
+                             'frequency': vm.terms[d[0]] || 1, // assign default value to missing GO terms
+                             'selected': true}
+                    ];
+                }));
+
+                // TODO: We are passing terms data here but not in the multiple experiment setting?
+                vm.nodeData = vm.termsData;
+
+            } else {
+
                 // We use a new variable experimentEnrichmentsFiltered which already has only those
                 // GO terms that exist in our DAG and only enrichments lower than threshold p-value.
                 // First experiment is selected by default!
@@ -329,19 +528,14 @@ var app = new Vue({
                                       'selected': x[1].hasOwnProperty(vm.experiments[0])} ] )
                     );
 
-                // TODO: Technically we only need this experiment data table when we are plotting
-                //       PCA biplot, it is not needed for regular GO term embeddings (t-SNE, MDS, UMAP).
-                //       But for now we are constructing it regardless of this!
-
-                // TODO: In the case when we are plotting PCA biplot we don't need semantic similarities
-                //       at all, so it makes sense to separate these two cases so that we don't have
-                //       redundant calculations!
-
-                // Experiment data table which will be used for PCA biplot:
-                // - rows are GO terms
-                // - column are experiments
-                // - elements are p-values
+                // If GO term is not present in some experiment give it p-value of 1.0
+                // TODO: Consider removing!
                 this.experimentDataTable = [...this.experimentEnrichmentsFiltered]
+                    .map( x => vm.experiments.map( e => e in x[1] ? x[1][e] : 1.0 ) );  
+
+                // Experiment data table where all GO terms are present!
+                // TODO: This is the one we should keep!
+                this.experimentDataTableUnfiltered = [...this.experimentEnrichments]
                     .map( x => vm.experiments.map( e => e in x[1] ? x[1][e] : 1.0 ) );  
 
             }
@@ -354,8 +548,7 @@ var app = new Vue({
             // Needed because => functions have no defined this property
             var vm = this; 
 
-            // Wait for all data to load
-            // NOTE: We are not loading example enrichments data anymore, the visualization starts empty!
+            // Wait for all data to load - the visualization starts empty!
             Promise.all(["data/go-dag-molecular-function.json",
                "data/go-dag-cellular-component.json",
                "data/go-dag-biological-process.json",
@@ -394,7 +587,7 @@ var app = new Vue({
                                 'length':vm.termsData.size, 
                                 't0':0, 
                                 't1':0, 
-                                'label':vm.ontologName,
+                                'label':vm.ontologyName,
                                 'warning':vm.loadingStatus['warning']};
 
             console.log('revigo/calculateLCA: Sent pairs and dag to worker!');
@@ -409,7 +602,7 @@ var app = new Vue({
                                     'length':vm.termsData.size, 
                                     't0':t0, 
                                     't1':t1, 
-                                    'label':vm.ontologName,
+                                    'label':vm.ontologyName,
                                     'warning':vm.loadingStatus['warning']};
 
                 vm.results = e.data; 
@@ -432,6 +625,7 @@ var app = new Vue({
         },
 
         calculateDistanceMatrix: function() {
+            let vm = this;
 
             let similarity = this.semanticSimilarity(this.results,this.terms,this.similarityMeasure);
 
@@ -441,15 +635,16 @@ var app = new Vue({
             // Default max value which we use for t-sne distance matrix 
             // Custom max function because Math.max is recursive and fails for large arrays
             let maxValue = similarity.map(x=>x[2]).reduce((max, v) => max >= v ? max : v, -Infinity);
-            let distMat = [...Array(goTerms.length)].map(e=>Array(goTerms.length).fill(maxValue));
+            vm.semanticSimilarityMatrix = [...Array(goTerms.length)].map(e=>Array(goTerms.length)
+                                                                    .fill(maxValue));
             for (const x of similarity) {
                 let x0 = this.termsToId.get(x[0]);
                 let x1 = this.termsToId.get(x[1]);
-                distMat[x0][x1] = x[2];
-                distMat[x1][x0] = x[2];
+                vm.semanticSimilarityMatrix[x0][x1] = x[2];
+                vm.semanticSimilarityMatrix[x1][x0] = x[2];
             }
             // Final distance matrix passed to child components is assigned only once!
-            this.distmat = distMat;
+            this.distmat = vm.semanticSimilarityMatrix;
             console.log("revigo/methods/calculateDistanceMatrix: Created distance matrix!");
 
         },
@@ -515,7 +710,134 @@ var app = new Vue({
                     return [];
             }
 
+        },
+
+        calculateSimGIC: function() {
+            var vm = this;
+            console.log("Calculating SimGIC with threshold p-value: " + vm.selectedPvalue);
+
+            // Formula for SimGIC:
+            //
+            // Information content: IC(t) = -log(p(t))
+            // Probability of a term: p(t) = n(t)/N
+            //
+            // SimGIC(p,q) is then simply the ratio of:
+            // - the sum of IC's for terms in the intersection of the GO sets p and q
+            // - and the sum of the IC's for terms in the union of the GO sets p and q.
+
+            // experimentEnrichments is a Map which contains all GO terms and enrichments for their experiments
+            // TODO: Zero p-values are replaced with the smallest non-zero p-value
+            //       Some GO terms have missing experiments! Give them value of 1.0 there!
+            let goterms = [...vm.experimentEnrichments.keys()];
+
+            let annotations = new Map(Object.entries(vm.terms));
+
+            // We are only interested in annotations of GO terms that actually appear in our dataset
+            // Those that do not appear get the default value of one annotation!
+            let annotationsFiltered = goterms.map( x => annotations.get(x) || 1);
+
+            let totalAnnotations = [...annotationsFiltered].reduce((sum,x)=>sum+x,0);
+
+            // Information content of each GO term in multiple experiment dataset
+            let infoContentGO = [...annotationsFiltered].map( (x) => -Math.log((x)/totalAnnotations) );
+
+            // Experiment x experiment intersection, union and similarity matrices
+            let intersectionMatrix = [...Array(vm.experiments.length)]
+                                            .map(e=>Array(vm.experiments.length)
+                                            .fill(0));
+            let unionMatrix = [...Array(vm.experiments.length)]
+                                            .map(e=>Array(vm.experiments.length)
+                                            .fill(0));
+            vm.simGICmatrix = [...Array(vm.experiments.length)]
+                                          .map(e=>Array(vm.experiments.length)
+                                          .fill(0));
+
+            // Marks the significant GO terms in each experiment
+            // We use experimentDataTableUnfiltered to determine which GO terms are significant or
+            // not significant in certain experiments, depending on their p-value.
+            let temp = zip(vm.experimentDataTableUnfiltered,infoContentGO).map( function(x) {
+                return [x[0].map( function(y) {
+                    return y <= vm.selectedPvalue;
+                }),x[1]];
+            });
+
+            // Calculate intersection and union matrices
+            temp.forEach( function(x) {
+                for (i = 0; i < vm.experiments.length; i++) {
+                    for (j = 0; j < vm.experiments.length; j++) {
+                       if (x[0][i]||x[0][j]) {
+                           unionMatrix[i][j] += x[1];
+                       }
+                       if (x[0][i]&&x[0][j]) {
+                           intersectionMatrix[i][j] += x[1];
+                       }
+                    }
+                }
+            });
+
+            // Divide intersection and union matrix elementwise to get SimGIC
+            for (i = 0; i < vm.experiments.length; i++) {
+                for (j = 0; j < vm.experiments.length; j++) {
+                   vm.simGICmatrix[i][j] = intersectionMatrix[i][j] / unionMatrix[i][j];
+                }
+            }
+
+            // TODO: I decided to pass information to components in a separate function!
+
+        },
+        
+        passInformationOnExperiments: function() {
+            var vm = this;
+            console.log("revigo/methods/passInformationOnExperiments: Passing information on experiments!");
+
+            // We will embbed experiments in the same way that we embbed GO terms (t-SNE, MDS, UMAP)
+            // so we can use the same variables which we used when embbeding GO terms to pass this
+            // information to the scatterplot component.
+
+            // Pass the SimGIC matrix through the distance matrix to the scatterplot component
+            vm.distmat = vm.simGICmatrix;
+
+            // Store experiment data in a separate variable
+            vm.experimentData = new Map(vm.experiments.map( function(d,i) {
+                return [
+                    d,
+                    {'pvalue': vm.selectedPvalue,  // TODO: Makes no sense in experiment setting!
+                     'frequency': 1, // TODO: Makes no sense in experiment setting!
+                     'count': [...vm.experimentEnrichments].reduce(
+                                function(x0,x1) {
+                                    if (x1[1].hasOwnProperty(d)) {return x0+1;} 
+                                    else{ return x0;}
+                                },0),  // How many GO terms are in each experiment
+                     'selected': true} 
+                    ];
+            }));
+
+            // We are using nodedata to pass node annotation data to scatter plot component!
+            vm.nodeData = vm.experimentData;
+
+        },
+
+        calculateHierarchicalClustering: function() {
+            var vm = this;
+            console.log("Calculating hierarchical clustering with threshold p-value: " + vm.selectedPvalue);
+
+            // Hierarchical clustering with Agnes algorithm (agglomerative nesting)
+            // Part of the ml-hclust library https://github.com/mljs/hclust
+            let tree = agnes(vm.simGICmatrix,{method:'ward',isDistanceMatrix:true});
+
+            // Add names to leaf nodes which correspond to experiments
+            // TODO: You can also name non-leaf nodes (clusters) but for now I keep it empty!
+            tree.traverse(function(x){ 
+                if (x.isLeaf) { 
+                    x.name = vm.experiments[x.index]; 
+                } else { 
+                    x.name = ""} 
+            });
+
+            vm.experimentHierarchy = tree;
+
         }
+
     }
 
 });
@@ -716,27 +1038,40 @@ Vue.component('input-box', {
 });
 
 Vue.component('scatter-plot', {
-    // props: ["distmat","termsdata"],
-    props: ["distmat","termsdata","embeddingtype","experimentdatatable","experiments"],
-        data: function () {
-            return {
-                canvas: null,
-                context: null,
-                width: 500, 
-                height: 500, 
-                margin: {top: 15, right: 15, bottom: 15, left: 15}, // TODO: We also have legend margin!
-                intervalID: null,
-                intervalCheckID: null,
-                custom: null,
-                qtree: null,
-                scaleX: null,
-                scaleY: null,
-                scaleR: null,
-                coordToData: null,
-                coordinatesReady: false,
-                loadings: null // PCA loadings for the PCA biplot
-            }
+
+    props: ["loadingstatus",
+            "distmat",
+            "nodedata",
+            "embeddingtype",
+            "visualizationcontext",
+            "experimentdatatable",
+            "experiments",
+            "experimenthierarchy"], 
+
+    data: function () {
+
+        return {
+            canvas: null,
+            context: null,
+            width: 500, 
+            height: 500, 
+            margin: {top: 15, right: 15, bottom: 15, left: 15}, // TODO: We also have legend margin!
+            intervalID: null,
+            intervalCheckID: null,
+            custom: null,
+            qtree: null,
+            scaleX: null,
+            scaleY: null,
+            scaleR: null,
+            coordToData: null,
+            coordinatesReady: false,
+            loadings: null, // PCA loadings for the PCA biplot
+            nNeighbors: 3, // for UMAP
+            nEpochs: 400 // for UMAP
+        }
+
     },
+
     mounted: function() {
 
         // TODO: Consider putting this in separate css file!
@@ -785,7 +1120,6 @@ Vue.component('scatter-plot', {
 
         // Put a placeholder text for empty canvas!
 
-        // let context = this.canvas.node().getContext("2d");
         this.context = this.canvas.node().getContext("2d");
         this.context.clearRect(0, 0, this.width, this.height);
 
@@ -795,31 +1129,49 @@ Vue.component('scatter-plot', {
 
     },
     watch: {
-        // Trigger when termsdata change.
+        loadingstatus() {
+            console.log('scatter-plot/watch/loadingstatus: Data is being loaded, better clean the plot!');
+            let vm = this;
+            
+            vm.cleanPlot();
+
+        },
+        // Trigger when nodedata change.
         // For now we assume that node positions did not change, only node properties (enrichment-color,
         // selected-transparency) so we don't recalculate the whole embedding.
-        // This watch is not triggered if we modify just the pvalue in termsdata - we have to reassign
+        // This watch is not triggered if we modify just the pvalue in nodedata - we have to reassign
         // the whole variable! 
-        termsdata(newTermsdata,oldTermsdata) {
+        nodedata(newNodedata,oldNodedata) {
+            // console.log('scatter-plot/watch/nodedata: nodedata changed!'); // Fires too much times!
             let vm = this;
 
-            // Set scale for radius which depends on the frequency of newly loaded GO terms
-            fmax = Math.max(...Array.from(this.termsdata.values()).map(x=>x.frequency));
-            fmin = Math.min(...Array.from(this.termsdata.values()).map(x=>x.frequency));
-            vm.scaleR.domain([fmin, fmax]);
+            // If we are visualizing GO terms or experiments in scatter plot layout
 
-            // Set scale for radius which depends on the pvalues of newly loaded GO terms
-            pmax = Math.max(...Array.from(this.termsdata.values()).map(x=>x.pvalue));
-            pmin = Math.min(...Array.from(this.termsdata.values()).map(x=>x.pvalue));
-            vm.scaleP.domain([pmin, pmax]);
+            // Initialize domains for the p-value and radius legends
+            // This is needed only when we visualize scatter plot of GO terms!
+            // TODO: Do we need this when we visualize scatter plot of experiments as well?
+            if (['go-go','go-ex'].includes(vm.visualizationcontext)) {
 
-            // TODO: If there are undefined values in termsdata set coordinatesReady to false!
-            //       This should disable drawing of nodes with undefined coordinates, but it also
-            //       freezes the last frame of the previous embedding, which is worse.
-            // var undefinedCoordinates = [...vm.termsdata].some( x => 
-                // typeof(x['x'])=='undefined' || typeof(x['y'])=='undefined'
-            // );
-            // this.coordinatesReady = !undefinedCoordinates;
+                // Set scale for radius which depends on the frequency of newly loaded GO terms
+                fmax = Math.max(...Array.from(this.nodedata.values()).map(x=>x.frequency));
+                fmin = Math.min(...Array.from(this.nodedata.values()).map(x=>x.frequency));
+                vm.scaleR.domain([fmin, fmax]);
+
+                // Set scale for color which depends on the pvalues of newly loaded GO terms
+                pmax = Math.max(...Array.from(this.nodedata.values()).map(x=>x.pvalue));
+                pmin = Math.min(...Array.from(this.nodedata.values()).map(x=>x.pvalue));
+                vm.scaleP.domain([pmin, pmax]);
+
+            }
+
+            // TODO: Initialize domains for p-value and radius scales but using something meaningful
+            //       for the experiments! Also, pass the legend label!
+            // if (['ex-ex'].includes(vm.visualizationcontext)) {
+                // // Set scale for radius which depends on the frequency of newly loaded GO terms
+                // fmax = Math.max(...Array.from(this.nodedata.values()).map(x=>x.count));
+                // fmin = Math.min(...Array.from(this.nodedata.values()).map(x=>x.count));
+                // vm.scaleR.domain([fmin, fmax]);
+            // }
 
             // Bind data to visual elements and redraw nodes - embedding did not change so node
             // positions do not change as well, only their properties (color, visibility).
@@ -833,16 +1185,18 @@ Vue.component('scatter-plot', {
             // If PCA biplot is selected as embedding you should make sure that arrows are drawn at the end!
             // Without this the last call to drawNodes would erase the arrows from the plot!
             if (vm.embeddingtype=='biplot') {
-                console.log('scatter-plot/watch/termsdata: Drawing PCA biplot arrows!');
+                console.log('scatter-plot/watch/nodedata: Drawing PCA biplot arrows!');
+
+                // TODO: Calculation of loadings is in the drawCanvas method which is not invoked here!
+                
                 this.loadings.forEach(function(x){
-                    drawLineWithArrows(vm.context,
-                                       0.5*vm.width,0.5*vm.height,
-                                       vm.scaleX(x[0]),vm.scaleY(x[1]),
-                                       5,8,false,true);
+                    vm.drawLineWithArrows(vm.context,
+                                          0.5*vm.width,0.5*vm.height,
+                                          vm.scaleX(x[0]),vm.scaleY(x[1]),
+                                          5,8,false,true);
                 });
 
-                // TODO: Add labels for arrows loadings as well!
-                //       Problem is that the labels are shown only for one experiment!?
+                // Add labels for arrows loadings!
                 zip(this.loadings,this.experiments).forEach(function(x){
                     vm.context.font = "10px Arial";
                     vm.context.fillStyle = "black";
@@ -851,35 +1205,86 @@ Vue.component('scatter-plot', {
             }
         },
         distmat(newDataLoaded, oldDataLoaded) {
-            console.log("scatter-plot/watch/distmat: Distmat changed, will check for termsdata as well!");
+            console.log("scatter-plot/watch/distmat: Distmat changed, will check for nodedata as well!");
             let vm = this;
 
-            // Only when both distmat and termsdata are loaded we proceed with the watch expression
-            // This avoids having a separate computed property which checks whether both termsdata and
+            // Check if there is a potential error with UMAP calculation due to small number of data points.
+            // This is emitted back to the main component through the @status attribute in the scatter-plot
+            // element, whose change triggers receiveStatusFromScatterPlot method in the main component.
+            if (vm.distmat.length<=vm.nNeighbors) {
+                this.$emit('status',{message: "Potential error if you choose UMAP as embedding!", 
+                                     umapdisabled:true});
+            } else {
+                this.$emit('status',{message: "There is no potential error if you choose UMAP as embedding!",
+                                     umapdisabled:false});
+            }
+
+            // Only when both distmat and nodedata are loaded we proceed with the watch expression
+            // This avoids having a separate computed property which checks whether both nodedata and
             // distmat changed - this expression checks that both are properly loaded.
             // TODO: Not entirely correct - if both old and new data have same number
             //       of GO terms this will pass but the GO terms will not match!
-            if (this.distmat.length!=0 && this.termsdata.size!=0 &&
-                this.distmat.length==this.termsdata.size) {
+            if (this.distmat.length!=0 && this.nodedata.size!=0 &&
+                this.distmat.length==this.nodedata.size) {
 
-                console.log('scatter-plot/watch/distmat: termsdata also changed, trigger redrawing!');
+                console.log('scatter-plot/watch/distmat: nodedata also changed, trigger redrawing!');
 
                 // Redraw the whole scatter plot - recalculate embedding and redraw all nodes
                 this.drawCanvas();
 
             }
         },
-        // embeddingType(newEmbeddingType,oldEmbeddingType) {
+
         embeddingtype(newEmbeddingType,oldEmbeddingType) {
             console.log("scatter-plot/watch/embeddingType: Embedding type changed, redrawing canvas!");
             let vm = this;
 
+            // If we are drawing PCA biplot we need experimentdatatable and nodedata to correspond!
+            if (vm.embeddingtype=='biplot') {
+
+                if (this.experimentdatatable!=0 && this.nodedata.size!=0 &&
+                    this.experimentdatatable.length==this.nodedata.size) {
+
+                    console.log("scatter-plot/watch/embeddingType: All conditions for PCA biplot satisfied!");
+                    vm.drawCanvas();
+
+                }
+            }
+
             // Check that distance matrix and data on terms is defined and that they are of equal size!
-            if (this.distmat.length!=0 && this.termsdata.size!=0 &&
-                this.distmat.length==this.termsdata.size) {
+            if (this.distmat.length!=0 && this.nodedata.size!=0 &&
+                this.distmat.length==this.nodedata.size) {
 
                 vm.drawCanvas();
             }
+
+
+        },
+
+        visualizationcontext(newVisualizationContext,oldVisualizationContext) {
+            console.log("scatter-plot/watch/visualizationcontext: Visualization context changed!");
+            let vm = this;
+
+            vm.cleanPlot();
+
+        },
+
+        experimentdatatable(newExperimentDataTable,oldExperimentDataTable) {
+            let vm = this;
+            console.log("scatter-plot/watch/exaperimentdatatable: Experiment data table changed!");
+
+            vm.drawCanvas();
+
+        },
+
+        experimenthierarchy(newExperimentHierarchy,oldExperimentHierarchy) {
+            console.log("scatter-plot/watch/experimentHierarchy: Someone changed experiment hierarchy!");
+            let vm = this;
+
+            vm.cleanPlot();
+
+            vm.drawExperimentHierarchy();
+
         }
     },
     methods: {
@@ -895,6 +1300,9 @@ Vue.component('scatter-plot', {
             console.log("scatter-plot/methods/drawCanvas: Clearing setInterval with ID: "+this.intervalID);
             clearInterval(this.intervalID);
 
+            // TODO: Not sure whether cleaning of all plots should be here or somewhere else?
+            vm.cleanPlot();
+
             // Stop the tsne calculation after 100 seconds
             // TODO: Check for the convergence of coordinates, rather than some specified time!
             //       You can get current coordinates with tsne.getSolution()
@@ -903,7 +1311,6 @@ Vue.component('scatter-plot', {
                 clearInterval(vm.intervalID);
             },10000);
 
-            // if (vm.embeddingType=='mds') {
             if (vm.embeddingtype=='mds') {
                 console.log("scatter-plot/methods/drawCanvas: Calculating MDS embedding!");
 
@@ -941,21 +1348,23 @@ Vue.component('scatter-plot', {
             } else if (vm.embeddingtype=='umap') {
                 console.log("scatter-plot/methods/drawCanvas: Calculating UMAP embedding!");
 
-                let nNeighbors = 3;
-                let nEpochs = 400;
+                // TODO: If the number of data points is very small - equal or less then nNeighbors,
+                //       we will not be able to calculate UMAP. This is not likely to happen with GO terms
+                //       but it may happen with the experiments whose numbers are typically much smaller!
+                //       We should check this explicitly and report error to the user!
 
                 // For each GO term find k most similar terms and save their similarity and index
                 let neighborsDistances = this.distmat.map(function(row,i){
                              return row.map(function(x,i){
                                  return {'val':x,'ind':i}})
                                .sort(function(x, y){return x.val > y.val ? 1 : x.val == y.val ? 0 : -1})
-                               .slice(0,nNeighbors)
+                               .slice(0,vm.nNeighbors)
                 });
 
                 let umap = new UMAP({
                   nComponents: 2,
-                  nEpochs: nEpochs,
-                  nNeighbors: nNeighbors,
+                  nEpochs: vm.nEpochs,
+                  nNeighbors: vm.nNeighbors,
                 });
 
                 // Indices of neirest neighbors
@@ -976,7 +1385,18 @@ Vue.component('scatter-plot', {
 
                 // Set precomputed knn indices and distances and initialize UMAP with dummy data
                 umap.setPrecomputedKNN(knnIndices,knnDistances);
-                umap.initializeFit(data);
+
+                // Actually, the button for UMAP is disabled if there are fewer data points
+                // (either GO terms or experiments) then nNeighbors, so user will not be able to select
+                // calculation of UMAP at all!
+                try {
+                    umap.initializeFit(data);
+                } 
+                catch {
+                    console.log("Error - There is too few data points for calculation of UMAP! Need more than "+vm.nNeighbors+"!");
+                    this.$emit('status',"Error - There is too few data points for calculation of UMAP! Need more than "+vm.nNeighbors+"!");
+                    return;
+                }
 
                 // Initial iterations before we start dynamic visualization
                 for (let i = 0; i < 10; i++) {
@@ -1016,7 +1436,7 @@ Vue.component('scatter-plot', {
                 vm.updateCoordinates(Y);
 
                 // TODO: Ideally, arrows for the biplot would be drawn here, but then they are overdrawn
-                //       by the drawNodes in the termsdata watcher! So arrows are drawn there!
+                //       by the drawNodes in the nodedata watcher! So arrows are drawn there!
                 //       The PCA loadings need to be accessible within the whole component for this to work!
 
             }
@@ -1034,9 +1454,13 @@ Vue.component('scatter-plot', {
                 var xyTooltip = vm.qtree.find(xy[0],xy[1]);
                 var closestNode = vm.coordToData.get(String(xyTooltip));
 
+                let closestNodeRadius = ['go-go','go-ex'].includes(vm.visualizationcontext) ?
+                                            vm.scaleR(closestNode.frequency) :
+                                            10;
+
                 // If mouse cursor is close enough to the closest point show tooltip
-                if (Math.abs(xy[0]-xyTooltip[0])<=vm.scaleR(closestNode.frequency) && 
-                    Math.abs(xy[1]-xyTooltip[1])<=vm.scaleR(closestNode.frequency)) {
+                if (Math.abs(xy[0]-xyTooltip[0])<=closestNodeRadius && 
+                    Math.abs(xy[1]-xyTooltip[1])<=closestNodeRadius) {
 
                     // Show the tooltip only when there is nodeData found by the mouse
                     d3.select('#tooltip')
@@ -1044,9 +1468,14 @@ Vue.component('scatter-plot', {
                       .style('top', xy[1]+1+'px') 
                       .style('left', xy[0]+1+'px') 
                       .html(function() { 
-                          return closestNode.name+
-                                 "</br>GOA annotations: "+closestNode.frequency+
-                                 "</br>p-value: "+closestNode.pvalue; 
+                          if (vm.visualizationcontext=='ex-ex') {
+                              return closestNode.name+
+                                     "</br>Count: "+closestNode.count;
+                          } else {
+                              return closestNode.name+
+                                     "</br>GOA annotations: "+closestNode.frequency+
+                                     "</br>p-value: "+closestNode.pvalue; 
+                          }
                       });
                 } else {
                     // Hide the tooltip when there our mouse doesn't find nodeData
@@ -1061,7 +1490,7 @@ Vue.component('scatter-plot', {
 
             let vm = this;
 
-            let goterms = Array.from(vm.termsdata.keys());
+            let goterms = Array.from(vm.nodedata.keys());
 
             let Y0min = Math.min(...Y.map(x=>x[0]));
             let Y0max = Math.max(...Y.map(x=>x[0]));
@@ -1081,12 +1510,13 @@ Vue.component('scatter-plot', {
                 // We have to stringify coordinates to use them as key, arrays won't work!
                 let key = String([vm.scaleX(d[0]),vm.scaleY(d[1])]);
 
-                // value inherits all fields from termsdata, including "frequency" and "pvalue"
+                // value inherits all fields from nodedata, including "frequency" and "pvalue"
 
                 // TODO: Sometimes we get an error "Cannot set property 'name' of undefined"
-                //       This happens because termsdata updates while goterms still has old value
+                //       This happens because nodedata updates while goterms still has old value
                 //       Check if this is still an issue!
-                let value = vm.termsdata.get(goterms[i]);
+
+                let value = vm.nodedata.get(goterms[i]);
                 value.name = goterms[i];
                 value.x = Y[i][0];
                 value.y = Y[i][1];
@@ -1094,9 +1524,9 @@ Vue.component('scatter-plot', {
 
             }));
 
-            // Update termsdata with the node coordinates. We will use it in binding data to visuals.
-            // Note that that this will trigger termsdata watcher!
-            vm.termsdata = new Map([...vm.termsdata].map( function(d) {
+            // Update nodedata with the node coordinates. We will use it in binding data to visuals.
+            // Note that that this will trigger nodedata watcher!
+            vm.nodedata = new Map([...vm.nodedata].map( function(d) {
                 var key = d[0];
                 var value = d[1];
                 var indexOfGOterm = goterms.indexOf(d[0]);
@@ -1133,22 +1563,27 @@ Vue.component('scatter-plot', {
             // Bind data to visual elements (does not draw anything yet!)
             // The color of non-selected nodes is not rendered, as their p-value is set to some default value.
             var join = vm.custom.selectAll('custom.circle')
-                .data(Array.from(vm.termsdata.values())) 
+                .data(Array.from(vm.nodedata.values())) 
                 .enter()
                 .append('custom')
                 .attr('class', 'circle')
                 .attr('x', function(d, i) { return vm.scaleX(d.x); })
                 .attr('y', function(d, i) { return vm.scaleY(d.y); })
-                .attr('radius', function(d){ return vm.scaleR(d.frequency); })
+                .attr('radius', function(d){ return ['go-go','ex-ex'].includes(vm.visualizationcontext) ? vm.scaleR(d.frequency) : 10; }) // .attr('radius', function(d){ return vm.scaleR(d.frequency); })
                 .attr('label',function(d){ return d.name; }) 
                 .attr('strokeStyle', function(d) { 
                     return d.selected ? 
                            'rgba(0,0,0,1)' : 
                            'rgba(0,0,0,'+String(selectedAlpha)+')'})
                 .attr('fillStyle', function(d) { 
-                    return d.selected ? 
-                           vm.scaleP(d.pvalue) : 
-                           'rgba(255,255,255,'+String(selectedAlpha)+')'});
+                    return ['go-go','go-ex'].includes(vm.visualizationcontext) ?
+                                d.selected ? 
+                                    vm.scaleP(d.pvalue) : 
+                                    'rgba(255,255,255,'+String(selectedAlpha)+')' : 
+                                    'rgba(255,255,255,'+String(selectedAlpha)+')'});
+                    // return d.selected ? 
+                           // vm.scaleP(d.pvalue) : 
+                           // 'rgba(255,255,255,'+String(selectedAlpha)+')'});
             
         },
 
@@ -1157,17 +1592,21 @@ Vue.component('scatter-plot', {
 
             let vm = this;
 
-            // Draw legend for p-values (node color)
-            vm.drawPlegend("#legendP", vm.scaleP);
+            // p-value and annotations legend only makes sense when nodes are GO terms, not experiments!
+            if (['go-go','go-ex'].includes(vm.visualizationcontext)) {
 
-            // Draw legend for GOA annotations (circle radius)
-            vm.drawRlegend("#legendR", vm.scaleR);
+                // Draw legend for p-values (node color)
+                vm.drawPlegend("#legendP", vm.scaleP, "p-value");
+
+
+                // Draw legend for GOA annotations (circle radius)
+                vm.drawRlegend("#legendR", vm.scaleR, "Annotations");
+            }
+
 
             // Check whether coordinates of the nodes are ready
             if (vm.coordinatesReady) {
 
-                // let context = canvas.node().getContext("2d");
-                // this.context = canvas.node().getContext("2d");
                 this.context.clearRect(0, 0, vm.width, vm.height);
 
                 var elements = vm.custom.selectAll('custom.circle');
@@ -1192,7 +1631,7 @@ Vue.component('scatter-plot', {
         // Generate legend with continuous colors from a prespecified scale
         // Strangely, this is not built in D3 by default!?
         // http://bl.ocks.org/syntagmatic/e8ccca52559796be775553b467593a9f
-        drawPlegend: function(selector_id, colorscale) {
+        drawPlegend: function(selector_id, colorscale, legendLabel) {
 
           var legendheight = 200,
               legendwidth = 80,
@@ -1255,12 +1694,12 @@ Vue.component('scatter-plot', {
             .attr("y", 12)
             .attr("fill", "currentColor")
             .attr("text-anchor", "start")
-            .text('p-value'); 
+            .text(legendLabel); 
 
         },
 
         // https://www.youtube.com/watch?v=XmVPHq4NhMA
-        drawRlegend: function(selector_id, sizescale) {
+        drawRlegend: function(selector_id, sizescale, legendLabel) {
 
           var legendheight = 150,
               legendwidth = 80,
@@ -1316,10 +1755,217 @@ Vue.component('scatter-plot', {
                 .attr("y", 12)
                 .attr("fill", "currentColor")
                 .attr("text-anchor", "start")
-                .text('Annotations'); 
+                .text(legendLabel); 
 
             });
+        },
+
+        drawExperimentHierarchy: function() {
+
+            console.log("scatter-plot/methods/drawExperimentHierarchy: Drawing experiment hierarchy!");
+            let vm = this;
+
+            var width = 500,
+                height = 500,
+                nodeRadius = 4.5;
+
+            let outerRadius = width / 2;
+            let innerRadius = outerRadius - 170;
+
+            // TODO: Use this to delete svg visualization when data changes!
+            // d3.select('#experimentHierarchy').selectAll("*").remove();
+
+            var svg = d3.select(this.$el)
+                .append("svg")
+                .lower()
+                .attr('id','experimentHierarchy')
+                .attr("viewBox", [-outerRadius, -outerRadius, width, width])
+                .attr("font-family", "sans-serif")
+                .attr("font-size", 10)
+                .attr('width',width)
+                .attr('height',height)
+                .style('position','absolute');
+
+            let root = d3.hierarchy(vm.experimenthierarchy, d => d.children)
+                  .sum(d => d.children ? 0 : 1)
+                  .sort((a, b) => (a.value - b.value) || d3.ascending(a.data.length, b.data.length));
+
+            let cluster = d3.cluster()
+                .size([360, innerRadius])
+                .separation((a, b) => 1);
+
+            cluster(root);
+
+            // Compute the maximum cumulative length of any node in the tree.
+            function maxLength(d) {
+              return d.data.length + (d.children ? d3.max(d.children, maxLength) : 0);
+            };
+
+            // Set the radius of each node by recursively summing and scaling the distance from the root.
+            function setRadius(d, y0, k) {
+              d.radius = (y0 += d.data.length) * k;
+              if (d.children) d.children.forEach(d => setRadius(d, y0, k));
+            };
+
+            let color = d3.scaleOrdinal() // .domain(["Bacteria", "Eukaryota", "Archaea"])
+                .range(d3.schemeCategory10)
+
+            // Set the color of each node by recursively inheriting.
+            function setColor(d) {
+              var name = d.data.name;
+              d.color = color.domain().indexOf(name) >= 0 ? color(name) : d.parent ? d.parent.color : null;
+              if (d.children) d.children.forEach(setColor);
+            };
+
+            setRadius(root, root.data.length = 0, innerRadius / maxLength(root));
+            setColor(root);
+
+            function linkVariable(d) {
+              return linkStep(d.source.x, d.source.radius, d.target.x, d.target.radius);
+            }
+
+            function linkConstant(d) {
+              return linkStep(d.source.x, d.source.y, d.target.x, d.target.y);
+            }
+
+            function linkExtensionVariable(d) {
+              return linkStep(d.target.x, d.target.radius, d.target.x, innerRadius);
+            }
+
+            function linkExtensionConstant(d) {
+              return linkStep(d.target.x, d.target.y, d.target.x, innerRadius);
+            }
+
+            function linkStep(startAngle, startRadius, endAngle, endRadius) {
+              const c0 = Math.cos(startAngle = (startAngle - 90) / 180 * Math.PI);
+              const s0 = Math.sin(startAngle);
+              const c1 = Math.cos(endAngle = (endAngle - 90) / 180 * Math.PI);
+              const s1 = Math.sin(endAngle);
+              return "M" + startRadius * c0 + "," + startRadius * s0
+                  + (endAngle === startAngle ? "" : "A" + startRadius + "," + startRadius + " 0 0 " + (endAngle > startAngle ? 1 : 0) + " " + startRadius * c1 + "," + startRadius * s1)
+                  + "L" + endRadius * c1 + "," + endRadius * s1;
+            }
+
+              svg.append("style").text(`
+
+            .link--active {
+              stroke: #000 !important;
+              stroke-width: 1.5px;
+            }
+
+            .link-extension--active {
+              stroke-opacity: .6;
+            }
+
+            .label--active {
+              font-weight: bold;
+            }
+
+            `);
+
+              const linkExtension = svg.append("g")
+                  .attr("fill", "none")
+                  .attr("stroke", "#000")
+                  .attr("stroke-opacity", 0.25)
+                .selectAll("path")
+                .data(root.links().filter(d => !d.target.children))
+                .join("path")
+                  .each(function(d) { d.target.linkExtensionNode = this; })
+                  .attr("d", linkExtensionConstant);
+
+              const link = svg.append("g")
+                  .attr("fill", "none")
+                  .attr("stroke", "#000") // .attr("stroke-opacity", 0.25) // TODO: I added this! 
+                .selectAll("path")
+                .data(root.links())
+                .join("path")
+                  .each(function(d) { d.target.linkNode = this; })
+                  .attr("d", linkConstant)
+                  .attr("stroke", d => d.target.color);
+
+              svg.append("g")
+                .selectAll("text")
+                .data(root.leaves())
+                .join("text")
+                  .attr("dy", ".31em")
+                  .attr("transform", d => `rotate(${d.x - 90}) translate(${innerRadius + 4},0)${d.x < 180 ? "" : " rotate(180)"}`)
+                  .attr("text-anchor", d => d.x < 180 ? "start" : "end")
+                  .text(d => d.data.name.replace(/_/g, " "))
+                  .on("mouseover", mouseovered(true))
+                  .on("mouseout", mouseovered(false));
+
+              function mouseovered(active) {
+                return function(event, d) {
+                  d3.select(this).classed("label--active", active);
+                  d3.select(d.linkExtensionNode).classed("link-extension--active", active).raise();
+                  do d3.select(d.linkNode).classed("link--active", active).raise();
+                  while (d = d.parent);
+                };
+              }
+
+
+
+        },
+
+        // TODO: A single function for removing all plot elements from the DOM!
+        //       Should be called before drawing new plot.
+        //       Still not sure whether this is the best way to implement this?
+        cleanPlot: function() {
+
+            console.log("scatter-plot/methods/cleanPlot: Cleaning all plots!");
+            let vm = this;
+
+            // Reset the interval for dynamic calculation of embeddings.
+            clearInterval(vm.intervalID);
+
+            // Clean all the legends. 
+            // SVG elements will remain. We create them at mount time so we cannot remove them completelly!
+            d3.select('#legendP').selectAll('*').remove();
+            d3.select('#legendR').selectAll('*').remove();
+
+            // Clear the canvas! The canvas element remains as it is created only once at mount time!
+            vm.context.clearRect(0, 0, vm.width, vm.height);
+
+            // Remove SVG for the experiment hierarchy.
+            // Otherwise remains on top of canvas element and messes with the mouseover listener for tooltip.
+            // We can remove the whole element because it is recreated in the drawExperimentHierarchy()
+            d3.select('#experimentHierarchy').remove();
+
+        },
+
+        // x0,y0: the line's starting point
+        // x1,y1: the line's ending point
+        // width: the distance the arrowhead perpendicularly extends away from the line
+        // height: the distance the arrowhead extends backward from the endpoint
+        // arrowStart: true/false directing to draw arrowhead at the line's starting point
+        // arrowEnd: true/false directing to draw arrowhead at the line's ending point
+        drawLineWithArrows: function(ctx,x0,y0,x1,y1,aWidth,aLength,arrowStart,arrowEnd){
+            var dx=x1-x0;
+            var dy=y1-y0;
+            var angle=Math.atan2(dy,dx);
+            var length=Math.sqrt(dx*dx+dy*dy);
+
+            ctx.translate(x0,y0);
+            ctx.rotate(angle);
+            ctx.beginPath();
+            ctx.moveTo(0,0);
+            ctx.lineTo(length,0);
+            if(arrowStart){
+                ctx.moveTo(aLength,-aWidth);
+                ctx.lineTo(0,0);
+                ctx.lineTo(aLength,aWidth);
+            }
+            if(arrowEnd){
+                ctx.moveTo(length-aLength,-aWidth);
+                ctx.lineTo(length,0);
+                ctx.lineTo(length-aLength,aWidth);
+            }
+
+            ctx.strokeStyle = "black"; 
+            ctx.stroke();
+            ctx.setTransform(1,0,0,1,0,0);
         }
+
     },
     template: '<div></div>'
 });
@@ -1332,7 +1978,7 @@ Array.prototype.unique = function() {
 }
 
 Vue.component('download-csv', {
-    props: ["distmat","ontology","similarity"], 
+    props: ["distmat","ontology","similarity","visualizationcontext"], 
     data: function() {
         return;
     },
@@ -1350,7 +1996,7 @@ Vue.component('download-csv', {
             return dict[this.similarity];
         }
     },
-    template: '<a v-bind:href="message" download="distmat.csv">'+
+    template: '<a v-if="visualizationcontext==\'go-go\'" v-bind:href="message" download="distmat.csv">'+
               'Download {{similarityFullName}} distance matrix for {{ontology}} ({{matrixShape}})'+
               '</a>'
 });
@@ -1358,37 +2004,4 @@ Vue.component('download-csv', {
 // Custom zip function
 const zip = (arr1, arr2) => arr1.map((k, i) => [k, arr2[i]]); // custom zip function
 
-// x0,y0: the line's starting point
-// x1,y1: the line's ending point
-// width: the distance the arrowhead perpendicularly extends away from the line
-// height: the distance the arrowhead extends backward from the endpoint
-// arrowStart: true/false directing to draw arrowhead at the line's starting point
-// arrowEnd: true/false directing to draw arrowhead at the line's ending point
-
-function drawLineWithArrows(ctx,x0,y0,x1,y1,aWidth,aLength,arrowStart,arrowEnd){
-    var dx=x1-x0;
-    var dy=y1-y0;
-    var angle=Math.atan2(dy,dx);
-    var length=Math.sqrt(dx*dx+dy*dy);
-
-    ctx.translate(x0,y0);
-    ctx.rotate(angle);
-    ctx.beginPath();
-    ctx.moveTo(0,0);
-    ctx.lineTo(length,0);
-    if(arrowStart){
-        ctx.moveTo(aLength,-aWidth);
-        ctx.lineTo(0,0);
-        ctx.lineTo(aLength,aWidth);
-    }
-    if(arrowEnd){
-        ctx.moveTo(length-aLength,-aWidth);
-        ctx.lineTo(length,0);
-        ctx.lineTo(length-aLength,aWidth);
-    }
-
-    ctx.strokeStyle = "black"; 
-    ctx.stroke();
-    ctx.setTransform(1,0,0,1,0,0);
-}
 

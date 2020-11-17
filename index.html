@@ -6,15 +6,18 @@
 <script src="static/jquery-3.4.1.min.js"></script>
 <script src="static/tsne.js"></script>
 <script src="static/vue.min.js"></script>
-<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+<script id="MathJax-script" async src="static/mathjax/tex-mml-chtml.js"></script>
+
 <script src="static/d3.v5.min.js"></script>
 
 <script src="static/numeric.min.js"></script> <!-- https://github.com/sloisel/numeric -->
 <script src="static/mds.js"></script> <!-- https://github.com/benfred/mds.js/tree/master -->
-<!-- <script src="static/ml-pca.js"></script> --> <!-- https://github.com/mljs/pca -->
 <script src="static/pca.min.js"></script> <!-- https://github.com/bitanath/pca -->
 
 <script src="static/umap-js.min.js"></script> <!-- https://github.com/PAIR-code/umap-js -->
+
+<script src="static/agnes.js"></script> <!-- agnes module from https://github.com/mljs/hclust --> 
 
 <link rel="icon" href="favicon.ico" type="image/x-icon" />
 
@@ -67,33 +70,82 @@ MathJax = {
     <h1>Non-linear embedding of GO terms</h1>
     <div id="revigo">
 
-        <scatter-plot :distmat="distmat" :termsdata="termsData" :embeddingtype="embeddingType" :experimentdatatable="experimentDataTable" :experiments="experiments"></scatter-plot>
+        <scatter-plot :loadingstatus="loadingStatus" 
+                      :distmat="distmat" 
+                      :nodedata="nodeData" 
+                      :embeddingtype="embeddingType" 
+                      :visualizationcontext="visualizationContext" 
+                      :experimentdatatable="experimentDataTable" 
+                      :experiments="experiments" 
+                      :experimenthierarchy="experimentHierarchy"
+                      @status=receiveStatusFromScatterPlot>
+        </scatter-plot>
 
         <progress-box :loadingstatus="loadingStatus" :thresholdpvalue="thresholdPvalue"></progress-box>
 
-        <form>
-            <input type="radio" id="tsne" value="tsne" v-model="embeddingType">
-            <label for="tsne">t-SNE</label>
-            <input type="radio" id="mds" value="mds" v-model="embeddingType">
-            <label for="mds">MDS</label>
-            <input type="radio" id="umap" value="umap" v-model="embeddingType">
-            <label for="umap">UMAP</label>
-            <input v-if="showExperimentSelector" type="radio" id="biplot" value="biplot" v-model="embeddingType">
-            <label v-if="showExperimentSelector" for="umap">PCA biplot</label>
+        <form v-if="multipleExperimentSetting">
+            <input type="radio" 
+                   id="go-go" 
+                   value="go-go"
+                   v-model="visualizationContext">
+            <label for="go-go">GO-GO</label>
+            <input type="radio"
+                   id="go-ex"
+                   value="go-ex"
+                   v-model="visualizationContext">
+            <label for="go-ex">GO-EX</label>
+            <input type="radio"
+                   id="ex-ex"
+                   value="ex-ex"
+                   v-model="visualizationContext">
+            <label for="ex-ex">EX-EX</label>
+        </form>
+
+        <form v-if="visualizationContext!='initial'">
+
+            <input v-if="visualizationContext!='go-ex'"
+                   type="radio" 
+                   id="tsne"
+                   value="tsne"
+                   v-model="embeddingType">
+            <label v-if="visualizationContext!='go-ex'" for="tsne">t-SNE</label>
+            <input v-if="visualizationContext!='go-ex'"
+                   type="radio"
+                   id="mds"
+                   value="mds"
+                   v-model="embeddingType">
+            <label v-if="visualizationContext!='go-ex'" for="mds">MDS</label>
+            <input v-if="visualizationContext!='go-ex'"
+                   type="radio"
+                   id="umap"
+                   value="umap"
+                   :disabled=umapdisabled
+                   v-model="embeddingType">
+            <label v-if="(visualizationContext!='go-ex')&&(!umapdisabled)" for="umap">UMAP</label>
+            <label v-if="(visualizationContext!='go-ex')&&(umapdisabled)" for="umap">UMAP disabled</label>
+
+            <input v-if="multipleExperimentSetting&&(visualizationContext=='go-ex')" 
+                   type="radio" 
+                   id="biplot" 
+                   value="biplot" 
+                   v-model="embeddingType">
+            <label v-if="multipleExperimentSetting&&(visualizationContext=='go-ex')"
+                   for="biplot">PCA biplot</label>
+
+            <input v-if="multipleExperimentSetting&&(visualizationContext=='ex-ex')"
+                   type="radio" 
+                   id="hierarchical" 
+                   value="hierarchical" 
+                   v-model="embeddingType">
+            <label v-if="multipleExperimentSetting&&(visualizationContext=='ex-ex')"
+                   for="hierarchical">Hierarchical</label>
+
         </form>
 
         <input-box @clicked="receiveDataFromChild"></input-box>
 
-        <!-- <div v-if="showExperimentSelector">
-            <br>
-            Experiment features:
-            <br>
-            <span v-for="(feature,index) of experimentFeatures">
-                <input type="checkbox" name="features" :value="feature" v-model="selectedFeatures">{{feature}}
-            </span>
-        </div> -->
-
-        <div v-if="showExperimentSelector">
+        <!-- Should only be visible when visualizing GO terms in multiple experiment setting -->
+        <div v-if="multipleExperimentSetting&&!(visualizationContext=='ex-ex')">
             <br>
             Experiments:
             <br>
@@ -101,6 +153,18 @@ MathJax = {
                 <input type="radio" id=experiment :value=experiment v-model="selectedExperiment">
                 <label for=experiment>{{experiment}}
                  <br>
+            </span>
+        </div>
+
+        <!-- p-value threshold selector for SimGIC -->
+        <!-- Should only be visible when visualizing experiments in multiple experiments setting -->
+        <div v-if="multipleExperimentSetting && (visualizationContext=='ex-ex') "> 
+            <br>
+            p-value threshold for the SimGIC:
+            <br>
+            <span v-for="pvalue in pvalueThresholds">
+                <input type="radio" id=pvalue :value=pvalue v-model="selectedPvalue">
+                <label for=pvalue>{{pvalue}}
             </span>
         </div>
 
@@ -114,22 +178,28 @@ MathJax = {
         <input type="radio" id="cell" value="cellular component" v-model="ontologyName">
         <label for="cell">cellular component</label>
 
+        <div v-if="visualizationContext=='go-go'">
+            <br>
+            <p>Select the semantic similarity measure</p>
+            <input type="radio" id="resnik" value="resnik" v-model="similarityMeasure">
+            <label for="resnik">Resnik method \( sim(t_1,t_2) = IC(t_{LCA}) \)</label>
+            <br>
+            <input type="radio" id="lin" value="lin" v-model="similarityMeasure">
+            <label for="lin">Lin method \( sim(t_1,t_2) = \frac{2 IC(t_{LCA})}{IC(t_1)+IC(t_2)} \)</label>
+            <br>
+            <input type="radio" id="rel" value="rel" v-model="similarityMeasure">
+            <label for="rel">SimRel method \( sim(t_1,t_2) = \frac{2 IC(t_{LCA}) (1-p(t_{LCA}))}{IC(t_1)+IC(t_2)}  \)</label>
+            <br>
+            <input type="radio" id="jiang" value="jiang" v-model="similarityMeasure">
+            <label for="jiang">Jiang method \( sim(t_1,t_2) = 1 - min(1, IC(t_1)+IC(t_2)-2IC(t_{LCA})) \)</label>
+        </div>
+
         <br><br>
-        <p>Select the semantic similarity measure</p>
-        <input type="radio" id="resnik" value="resnik" v-model="similarityMeasure">
-        <label for="resnik">Resnik method \( sim(t_1,t_2) = IC(t_{LCA}) \)</label>
-        <br>
-        <input type="radio" id="lin" value="lin" v-model="similarityMeasure">
-        <label for="lin">Lin method \( sim(t_1,t_2) = \frac{2 IC(t_{LCA})}{IC(t_1)+IC(t_2)} \)</label>
-        <br>
-        <input type="radio" id="rel" value="rel" v-model="similarityMeasure">
-        <label for="rel">SimRel method \( sim(t_1,t_2) = \frac{2 IC(t_{LCA}) (1-p(t_{LCA}))}{IC(t_1)+IC(t_2)}  \)</label>
-        <br>
-        <input type="radio" id="jiang" value="jiang" v-model="similarityMeasure">
-        <label for="jiang">Jiang method \( sim(t_1,t_2) = 1 - min(1, IC(t_1)+IC(t_2)-2IC(t_{LCA})) \)</label>
-        
-        <br><br>
-        <download-csv :distmat="distmat" :ontology="ontologyName" :similarity="similarityMeasure"></download-csv>
+        <download-csv :distmat="distmat" 
+                      :ontology="ontologyName" 
+                      :similarity="similarityMeasure"
+                      :visualizationcontext="visualizationContext">
+        </download-csv>
 
     </div> 
 </body>
