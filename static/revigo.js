@@ -36,6 +36,7 @@ var app = new Vue({
         experimentEnrichments: [],
         experimentEnrichmentsFiltered: [],
         experimentDataTable: [],
+        experimentDataTableUnfiltered: [], 
 
         // Calculated data
         distmat: [], 
@@ -1999,6 +2000,152 @@ Vue.component('download-csv', {
     template: '<a v-if="visualizationcontext==\'go-go\'" v-bind:href="message" download="distmat.csv">'+
               'Download {{similarityFullName}} distance matrix for {{ontology}} ({{matrixShape}})'+
               '</a>'
+});
+
+Vue.component('data-table', {
+
+    props: ["nodedata",
+            "experimentdatatableunfiltered",
+            "experimentenrichments",
+            "experiments",
+            "multipleexperimentsetting"],
+
+    data: function() {
+        return {
+            table: null
+        }
+    },
+
+    mounted: function() {
+
+        let vm = this;
+
+        vm.scaleP = d3.scaleLog().range(['red','steelblue']);
+
+    },
+
+    watch: {
+
+        // Used in the single experiment setting.
+        nodedata: function(newNodeData,oldNodeData) {
+            let vm = this;
+            console.log("data-table/watch/nodedata: nodedata changed!");
+
+            if (!vm.multipleexperimentsetting) {
+
+                let tabledata = [...vm.nodedata].map(function(d){return [d[0],d[1].pvalue]});
+
+                // Existing datatable cannot be reinitialized, so if it already exist destroy it before
+                if ($.fn.dataTable.isDataTable( this.$refs.datatable )) {
+                    console.log("data-table/watch/nodedata: Destroying existing table!");
+                    vm.table.destroy(); // Not enough, we need to empty table as well!
+                    $(vm.$refs.datatable).empty();
+                }
+
+                // Set scale for color which depends on the pvalues of newly loaded GO terms
+                let pmax = Math.max(...Array.from(vm.nodedata.values()).map(x=>x.pvalue));
+                let pmin = Math.min(...Array.from(vm.nodedata.values()).map(x=>x.pvalue));
+                vm.scaleP.domain([pmin, pmax]);
+
+                vm.table = $(this.$refs.datatable).DataTable( {
+                        scrollY:        "200px",
+                        scrollCollapse: true,
+                        // paging:         false,
+                        deferRender:    true, // Faster on large tables!
+                        scroller:       true,  // Requires pagination to be disabled (paging: false)! 
+                        data: tabledata,
+                        columns: [
+                            { title: "GO term" },
+                            { title: "p-value",
+                              // width: "15px",
+                              render: function(data,type,row,meta) {
+                                return "<div style='background-color:"+vm.scaleP(data)+"'>"+
+                                       Number.parseFloat(data).toExponential(1)+
+                                       "<div>";
+                              }
+                            }
+                        ]
+                    } );
+            }
+
+        },
+
+        experimentdatatableunfiltered: function() {
+            let vm = this;
+            console.log("data-table/watch/experimentdatatableunfiltered: changed!");
+        },
+
+        // Used in the multiple experiment setting.
+        experimentenrichments: function() {
+            let vm = this;
+            console.log("data-table/watch/experimentenrichments: changed!");
+
+            if (vm.multipleexperimentsetting) {
+
+                let tabledata = [...vm.experimentenrichments].map(x=>
+                    [x[0]].concat(vm.experiments.map(y=>x[1][y]))
+                );
+
+                // Existing datatable cannot be reinitialized, so if it already exist destroy it before
+                if ($.fn.dataTable.isDataTable( this.$refs.datatable )) {
+                    console.log("data-table/watch/experimentenrichments: Destroying existing table!");
+                    vm.table.destroy(); // Not enough, we need to empty table as well!
+                    $(vm.$refs.datatable).empty();
+                }
+
+                // Set scale for color which depends on the pvalues of newly loaded GO terms
+                let pmax = Math.max(...Array.from(vm.nodedata.values()).map(x=>x.pvalue));
+                let pmin = Math.min(...Array.from(vm.nodedata.values()).map(x=>x.pvalue));
+                vm.scaleP.domain([pmin, pmax]);
+
+                vm.table = $(this.$refs.datatable).DataTable( {
+                        scrollY:        "200px",
+                        scrollCollapse: true,
+                        deferRender:    true, // Faster on large tables!
+                        scroller:       true,  // Requires pagination to be disabled (paging: false)! 
+                        data: tabledata,
+                        columns: [ { title: "GO term" , 
+                                     defaultContent: "", 
+                                 } ].concat(
+                            vm.experiments.map( function(d,i) {
+                                return {title: String(i), 
+                                    defaultContent: "", // Not needed because we are handling it in render!
+                                    // width: "15px",
+                                    render: function(data,type,row,meta) {
+                                        return "<div style='background-color:"+
+                                               ((data<0.01)?vm.scaleP(data):"white")+"'>"+
+                                               ((typeof data !== 'undefined')?
+                                                Number.parseFloat(data).toExponential(1):
+                                                "")+
+                                               "<div>";
+
+                                    }
+                                };
+                            })
+                        )
+                    } );
+
+                // Putting tooltips on headers
+                vm.table
+                  .columns()
+                  .header()
+                  .to$()
+                  .attr('data-toggle','tooltip')
+                  .attr('title',function(){
+                      if (Number.isInteger(Number($(this).text()))) {
+                          return vm.experiments[Number($(this).text())];
+                      }
+                  });
+
+            }
+
+        }
+
+    },
+    // With the enclosing div in the template we have to access the table through a reference!
+    // With enclosing div: this.$refs.datatable
+    // Without enclosing div: this.$el
+    template: '<div style="width:600px"><table ref="datatable" class="display compact"></table></div>'
 });
 
 // Custom zip function

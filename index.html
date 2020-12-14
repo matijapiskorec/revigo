@@ -19,6 +19,10 @@
 
 <script src="static/agnes.js"></script> <!-- agnes module from https://github.com/mljs/hclust --> 
 
+<link rel="stylesheet" type="text/css" href="static/datatables/datatables.min.css"/>
+<script type="text/javascript" src="static/datatables/datatables.min.js"></script>
+<script type="text/javascript" src="static/datatables/Scroller-2.0.3/js/dataTables.scroller.min.js"></script>
+
 <link rel="icon" href="favicon.ico" type="image/x-icon" />
 
 <style>
@@ -50,6 +54,11 @@ div#tooltip {
 
 .exampleLink:hover {
     cursor: pointer;
+}
+
+/* To make data table even more compact! */
+table.dataTable.compact tbody td {
+    padding: 0px;
 }
 
 </style>
@@ -200,6 +209,15 @@ MathJax = {
                       :similarity="similarityMeasure"
                       :visualizationcontext="visualizationContext">
         </download-csv>
+
+        <br><br>
+        <data-table :nodedata="nodeData"
+                    :experimentdatatableunfiltered="experimentDataTableUnfiltered"
+                    :experimentenrichments="experimentEnrichments"
+                    :experiments="experiments"
+                    :multipleexperimentsetting="multipleExperimentSetting">
+        </data-table>
+
 
     </div> 
 </body>
