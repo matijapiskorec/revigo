@@ -10,33 +10,51 @@ var app = new Vue({
         dagMol: [],
         dagCell: [],
         terms: [],
+        names: [],
         enrichments: [],
 
         // Status of the application
         dataLoaded: false, // for user data (enrichments)
         basicDataLoaded: false, // for server data (gene ontology and annotations)
-        loadingStatus: {'start': true, 
-                        'loading': true, 
-                        'length': 0, 
-                        't0': 0, 
-                        't1': 0, 
-                        'label': '', 
-                        'warning':''}, 
+        lcaStatus: {'algorithm': 'LCA',
+                    'start': true, 
+                    'loading': true, 
+                    'termCount': 0, 
+                    'duration': 0,
+                    'namespace': '', 
+                    'result': '', // If we need to report on the results of the calculation in some way
+                    'warning': ''}, 
+        revigoStatus: {'algorithm': 'Revigo',
+                       'start': true, 
+                       'loading': true, 
+                       'progress': 0, // In percentages (LCA calculation doesn't have this!)
+                       'experiment': '', // Only in multiple experiment case!
+                       'termCount': 0, 
+                       'duration': 0,
+                       'namespace': '', 
+                       'result': '', // If we need to report on the results of the calculation in some way
+                       'warning': ''}, 
         umapdisabled: false, // for disabling umap radio button if needed
+        filterRevigoDone: false, // for Revigo algorithm
+        resetEmbeddingType: true,
+        revigoStartTime: '',
 
         // Intermediary data
         lcaWorker: [],
+        revigoWorker: [],
         termsToId: [],
         results: [],
         experimentFeatures: [],
         selectedFeatures: [],
         experiments: [],
         selectedExperiment: [],
-        enrichmentsFiltered: [],
+        enrichmentsFiltered: [], // TODO: Currently an Array, consider making it a Map!
+        enrichmentsFilteredDAG: [],
         experimentEnrichments: [],
         experimentEnrichmentsFiltered: [],
+        experimentEnrichmentsFilteredDAG: [], // TODO: Still testing this!
         experimentDataTable: [],
-        experimentDataTableUnfiltered: [], 
+        // experimentDataTableUnfiltered: [], 
 
         // Calculated data
         distmat: [], 
@@ -46,6 +64,9 @@ var app = new Vue({
         simGICmatrix: [],
         experimentHierarchy: [],
         semanticSimilarityMatrix: [],
+        remaining_terms_all: new Map(),
+        final_remaining_terms: [],
+        redundancyMap: new Map(), // Which term is represented by some other term in the Revigo hierarchy!
 
         // Visualization type
         multipleExperimentSetting: false, // Defaults to GO-GO visualization context
@@ -55,9 +76,12 @@ var app = new Vue({
         // Visualization parameters
         similarityMeasure: 'resnik', // resnik, lin, rel, jiang
         selectedPvalue: 0.01, // for SimGIC
-        thresholdPvalue: 0.01, // TODO: Should be replaced with REVIGO redundancy elimination algorithm!
         pvalueThresholds: [0.01,0.05,0.1,0.5], // p-value thresholds for SimGIC
-        ontologyName: "biological processes" // biological processes, cellular component, molecular function
+        ontologyName: "biological processes", // biological processes, cellular component, molecular function
+
+        // TODO: Testing and development parameters!
+        revigoAlgorithmType: 'LCA'
+        // revigoAlgorithmType: 'NMF'
 
     },
 
@@ -69,6 +93,9 @@ var app = new Vue({
         // Worker which will calculate LCA in a separate thread
         // NOTE: make sure your browser does not load old cached version!
         this.lcaWorker = new Worker('static/worker-lca.js');
+
+        // Use different web worker depending whether we are using NMF embedding for Revigo or not!
+        this.revigoWorker = new Worker('static/worker-revigo.js');
 
         console.log('revigo/created: New worker created!');
     },
@@ -89,25 +116,89 @@ var app = new Vue({
         dataLoaded: function(newDataLoaded,oldDataLoaded) {
 
             if (newDataLoaded) {
+                var vm = this; 
                 console.log("revigo/watch/dataLoaded: All data successfully loaded!");
 
                 this.filterEnrichmentsDAG();
-                this.filterEnrichmentsPvalue() // TODO: To be replaced with Revigo's algorithm!
+
+                // Call a web worker for calculation so results are asynchronous!
+                // Results are processed in watch expressions and callback functions!
+                this.filterRevigo(); 
+
+            }
+        },
+
+        // Revigo's redundancy elimination algorithm is executed asynchronously in a worker,
+        // so this watcher is triggered when results are done!
+        filterRevigoDone: function(newFilterRevigoDone,oldFilterRevigoDone) {
+            var vm = this; 
+
+            if (newFilterRevigoDone) {
+                console.log("revigo/watch/filterRevigoDone: Revigo algorithm finished!");
+
                 this.updateTermsData();
 
-                // TODO: We should consider calculating LCA only when user chooses the embedding type!
-                this.calculateLCA();
-
                 // Reset the dataLoaded so that we can set it to true when needed
-                // Reset will again trigger this dataLoaded watch but will have no effect as else clause is empty
+                // Autotriggers this dataLoaded watch but will have no effect as else clause is empty
                 this.dataLoaded = false;
 
-                // Reset the embedding type.
-                this.embeddingType = '';
+                let revigoEndTime = performance.now();
+                vm.revigoStatus['algorithm'] = 'Revigo';
+                vm.revigoStatus['start'] = false;
+                vm.revigoStatus['loading'] = false; 
+                vm.revigoStatus['termCount'] = vm.multipleExperimentSetting ? 
+                                                    vm.experimentEnrichmentsFilteredDAG.size : 
+                                                    vm.enrichmentsFilteredDAG.length;
+                vm.revigoStatus['duration'] = revigoEndTime-vm.revigoStartTime;
+                vm.revigoStatus['namespace'] = vm.ontologyName;
+                vm.revigoStatus['result'] = '';
 
-                // Change the visualization context from initial to GO-GO
-                this.visualizationContext = 'go-go';
+                if (this.visualizationContext=='initial') { 
+                    
+                    // Change the visualization context from initial to GO-GO
+                    this.visualizationContext = 'go-go';
+                }
+
+                if (vm.visualizationContext=='go-go') {
+
+                    // Calculation of distance matrix is automatically called in the watcher 
+                    // for results from LCA!
+                    vm.calculateLCA(); 
+
+                    // TODO: Check if this would be better put in filterEnrichments, where we already have it
+                    //       for a single experiment setting!
+                    //       In multiple experiment setting nodeData stores information on experiments, 
+                    //       not terms!
+                    // TODO: Consider moving out of if (doesn't apply to EX-EX case!)
+                    vm.nodeData = vm.termsData;  
+                }
+
+                if (vm.visualizationContext=='go-ex') {
+                    // TODO: Consider moving out of if (doesn't apply to EX-EX case!)
+                    vm.nodeData = vm.termsData; 
+                }
+
+                // TODO: For this case to work properly I first have to decouple filtering by ontology space from
+                //       filtering by p-value. The SimGIC algorithm is doing selection of enriched/non-enriched
+                //       terms and so it makes sense to pass all non-redundat GO terms. The redundancy will be
+                //       calculated with Revigo's algorithm, on a specific ontology space.
+                if (vm.visualizationContext=='ex-ex') {
+
+                    vm.calculateSimGIC();
+
+                    // TODO: Sets the nodeData with experiment information instead of term information
+                    vm.passInformationOnExperiments();
+
+                    if (vm.embeddingType=='hierarchical') {
+                        vm.calculateHierarchicalClustering();
+                    } 
+                }
+
             }
+
+            // Reset status variable (won't trigger this watcher because there is if clause at beggining!)
+            vm.filterRevigoDone = false;
+
         },
 
         ontologyName: function(newOntologyName, oldOntologyName) {
@@ -116,44 +207,23 @@ var app = new Vue({
             console.log("revigo/watch/ontologyName: Changed value to "+newOntologyName);
 
             if (newOntologyName=="biological processes") {
-                this.dag = this.dagBio;
+                vm.dag = vm.dagBio;
+                vm.nmfEmbedding = vm.nmfEmbeddingBio;
             } else if (newOntologyName=="molecular function") {
-                this.dag = this.dagMol;
+                vm.dag = vm.dagMol;
+                vm.nmfEmbedding = vm.nmfEmbeddingMol;
             } else if (newOntologyName=="cellular component") {
-                this.dag = this.dagCell;
+                vm.dag = vm.dagCell;
+                vm.nmfEmbedding = vm.nmfEmbeddingCell;
             }
+
+            // Reset the embedding type!
+            vm.resetEmbeddingType = false;
 
             this.filterEnrichmentsDAG();
-            this.filterEnrichmentsPvalue() // TODO: To be replaced with Revigo's algorithm!
-            this.updateTermsData();
 
-            if (vm.visualizationContext=='go-go') {
-
-                // Calculation of distance matrix is automatically called in the watcher for results from LCA!
-                vm.calculateLCA(); 
-
-                // TODO: Check if this would be better put in filterEnrichments, where we already have it
-                //       for a single experiment setting!
-                vm.nodeData = vm.termsData; 
-            }
-
-            if (vm.visualizationContext=='go-ex') {
-                vm.nodeData = vm.termsData;
-            }
-
-            // TODO: For this case to work properly I first have to decouple filtering by ontology space from
-            //       filtering by p-value. The SimGIC algorithm is doing selection of enriched/non-enriched
-            //       terms and so it makes sense to pass all non-redundat GO terms. The redundancy will be
-            //       calculated with Revigo's algorithm, on a specific ontology space.
-            if (vm.visualizationContext=='ex-ex') {
-
-                vm.calculateSimGIC();
-                vm.passInformationOnExperiments();
-
-                if (vm.embeddingType=='hierarchical') {
-                    vm.calculateHierarchicalClustering();
-                } 
-            }
+            // Runs asynchronously so the results are processed in a separate watcher!
+            this.filterRevigo(); 
 
         },
 
@@ -181,17 +251,21 @@ var app = new Vue({
             var vm = this; 
             console.log('Somebody selected a new experiment: ' + newSelectedExperiment);
 
+            // NOTE: If embedding type is not defined this continues as normal, but in the nodedata watcher 
+            //       in the scatter plot component the visualization will be skipped!
+            
             // Update termsdata with the information from the newly selected experiment.
             // An assumption is that termsdata already contains all GO terms which exist in our DAG
             // and are lower than threshold p-value. GO terms visibility will reflect 'selected' attribute.
             this.termsData = new Map([...this.termsData].map( function(d) {
                 var key = d[0];
                 var value = d[1];
-                var temp = vm.experimentEnrichmentsFiltered.get(d[0]);
+                var temp = vm.experimentEnrichmentsFilteredDAG.get(d[0]); 
                 value['pvalue'] = temp.hasOwnProperty(newSelectedExperiment) ? 
                                   temp[newSelectedExperiment] :
-                                  vm.thresholdPvalue, 
-                value['selected'] = vm.experimentEnrichmentsFiltered.get(d[0])
+                                  undefined; 
+
+                value['selected'] = vm.experimentEnrichmentsFilteredDAG.get(d[0]) 
                                       .hasOwnProperty(newSelectedExperiment);
                 return [key,value];
             }));
@@ -287,6 +361,60 @@ var app = new Vue({
                 vm.passInformationOnExperiments();
 
             }
+        },
+
+        remaining_terms_all(newRemainingTerms,oldRemainingTerms) {
+            let vm = this;
+            console.log("revigo/watch/remaining_terms_all: Someone changed remaining_terms_all!");
+
+            // NOTE: In single experiment setting the remaining_terms_all is an Array, while in
+            //       multiple experiment setting it is a Map!
+
+            // TODO: If the Map is empty, this means that we just initialized it, so we can skip the rest!
+            if (vm.remaining_terms_all.size==0) {
+                return;
+            }
+
+            // Single experiment setting
+            if (!vm.multipleExperimentSetting) {
+
+                // In single experiment setting there is no aggregation of non-redundant terms!
+                // This is passed to the data table for visualization!
+                vm.final_remaining_terms = vm.remaining_terms_all;
+
+                // Filter enrichments based on the Revigo's algorithm!
+                vm.enrichmentsFiltered = vm.enrichmentsFilteredDAG 
+                                           .filter( x => vm.final_remaining_terms.includes(x[0]) );
+
+                // Revigo runs asynchronously so we need to set status variable so that the main app
+                // knows that algorithm finished.
+                vm.filterRevigoDone = true;
+
+            // Multiple experiment setting
+            } else {
+
+                if (vm.remaining_terms_all.size == vm.experiments.length) {
+                    console.log('revigo/watch/remaining_terms_all: Terms from all experiments collected!');
+
+                    // Aggregate results from all experiments by choosing all terms which are non-redundant
+                    // in at least one experiment, basically taking union of all non-redundant terms accross
+                    // all experiments.
+                    // This is passed to the data table for visualization!
+                    vm.final_remaining_terms = 
+                        [...vm.remaining_terms_all].reduce((sum,x)=>sum.concat(x[1]),[]).unique();
+
+                    // Filter the enrichments based on the final set of non-redundant terms!
+                    vm.experimentEnrichmentsFiltered = 
+                        new Map( [...vm.experimentEnrichmentsFilteredDAG] 
+                               .filter( x => vm.final_remaining_terms.includes(x[0]) )
+                        );
+
+                    // Set the status variable so that the app knows that Revigo algorithm finished!
+                    vm.filterRevigoDone = true;
+
+                }
+            }
+
         }
 
     },
@@ -328,14 +456,11 @@ var app = new Vue({
 
                 console.log("revigo/methods/receiveDataFromChild: Received data for a single experiment");
 
-                // Hide experiment selector
-                this.multipleExperimentSetting = false;
-
                 // TODO: Hack to convert Map back to Object, ideally enrichments should be in one or the other!
                 this.enrichments = Object.fromEntries([...value]);
 
                 this.dataLoaded = true;
-                this.loadingStatus['warning'] = '';
+                this.lcaStatus['warning'] = '';
 
             } else {
 
@@ -374,11 +499,15 @@ var app = new Vue({
                 // TODO: Should this replace termsData? A master format for all enrichments?
                 //       There are properties which are not tied to experiments - e.g. frequency.
                 this.experimentEnrichments = new Map([...value].map( x =>
-                    [x[0], Object.fromEntries( x[1].map( y => 
-                        [ vm.experimentFeatures
-                            .filter( z => y[z] != '' )
-                            .map( z => y[z] ).join('_'),
-                          y['enrichment']] ))]
+                    [x[0], 
+                     Object.fromEntries( x[1].map( y => 
+                        [ vm.experimentFeatures.filter( z => y[z] != '' )
+                                               .map( z => y[z] )
+                                               .join('_'),
+                          y['enrichment']
+                        ] 
+                     ))
+                    ]
                 ));
 
                 // TODO: Hacky solution to make multiple experiment format identical to the single experiment.
@@ -426,9 +555,25 @@ var app = new Vue({
                                            ] )
                     );
 
-                    this.loadingStatus['warning'] = 'All zero p-values replaced with the smallest '+
+                    this.lcaStatus['warning'] = 'All zero p-values replaced with the smallest '+
                                                     'non-zero p-value!';
                 }
+
+                // // TODO: ------- MOVED FROM UPDATE TERMS DATA!
+                // // BUG: PCA BIPLOT DOES NOT WORK ANYMORE!
+
+                // // // TODO: MOVED TO filterEnrichmentsDAG!
+                // // // If GO term is not present in some experiment give it p-value of 1.0
+                // // // TODO: Consider removing!
+                // // this.experimentDataTable = [...this.experimentEnrichmentsFiltered]
+                // //     .map( x => vm.experiments.map( e => e in x[1] ? x[1][e] : 1.0 ) );  
+
+                // // Experiment data table where all GO terms are present!
+                // // TODO: This is the one we should keep!
+                // this.experimentDataTableUnfiltered = [...this.experimentEnrichments]
+                //     .map( x => vm.experiments.map( e => e in x[1] ? x[1][e] : 1.0 ) );  
+
+                // // TODO: -------
 
                 // Pass the enrichments from multiple experiments to be visualized
                 this.enrichments = enrichments;
@@ -437,61 +582,186 @@ var app = new Vue({
             }
         },
 
+        // Filter all GO terms belonging to the current ontology namespace (stored as DAG)
         filterEnrichmentsDAG: function() {
             var vm = this; 
             console.log("revigo/methods/filterEnrichmentsDAG: Selecting terms from specific ontology space!");
 
             if (!this.multipleExperimentSetting) {
 
-                // Single experiment setting
-                this.enrichmentsFiltered = Object.entries(this.enrichments)
+                // TODO: NOT NEEDED ANYMORE?!
+                // // Single experiment setting
+                // this.enrichmentsFiltered = Object.entries(this.enrichments)
+                //                                  .filter( x => this.dag.hasOwnProperty(x[0]) );
+
+                // For use in data table where we show all GO terms from current ontology namespace,
+                // regardless of further filtering with Revigo algorithm!
+                this.enrichmentsFilteredDAG = Object.entries(this.enrichments)
                                                  .filter( x => this.dag.hasOwnProperty(x[0]) );
 
             } else {
 
-                // Store all p-values of all experiments but only those that are above p-value threshold. 
-                // All of these GO terms will be embedded, but only some will be actually visible!
-                this.experimentEnrichmentsFiltered = 
+                // TODO: NOT NEEDED ANYMORE?!
+                // // Store p-values of all GO terms of all experiments - all of these will be embedded but
+                // // only those belonging to the currently selected experiment will actually be visible!
+                // this.experimentEnrichmentsFiltered = 
+                //     new Map( [...vm.experimentEnrichments]
+                //         .filter( x => vm.dag.hasOwnProperty(x[0]) ) // make sure GO term exists in our DAG
+                //     );
+                
+                // Store p-values of all GO terms of all experiments - all of these will be embedded but
+                // only those belonging to the currently selected experiment will actually be visible!
+                this.experimentEnrichmentsFilteredDAG = 
                     new Map( [...vm.experimentEnrichments]
                         .filter( x => vm.dag.hasOwnProperty(x[0]) ) // make sure GO term exists in our DAG
                     );
-                
+
+                // // TODO: MOVED FROM receiveDataFromChild (ORIGINALY FROM updateTermsData)
+                // // If GO term is not present in some experiment give it p-value of 1.0
+                // // TODO: Consider removing!
+                // this.experimentDataTable = [...this.experimentEnrichmentsFiltered]
+                //     .map( x => vm.experiments.map( e => e in x[1] ? x[1][e] : 1.0 ) );  
+
             }
 
-            // TODO: Will run manually outside of this function!
-            // vm.updateTermsData();
-            
         },
 
-        filterEnrichmentsPvalue: function() {
+        filterRevigo: function() {
             var vm = this; 
-            console.log("revigo/methods/filterEnrichmentsPvalue: Filtering terms by p-value!");
+            console.log("revigo/methods/filterRevigo: Revigo's redundancy elimination algorithm!");
 
-            if (!this.multipleExperimentSetting) {
-
-                // Single experiment setting
-                this.enrichmentsFiltered = vm.enrichmentsFiltered 
-                                             .filter( x => x[1] < this.thresholdPvalue);
-
+            // Reset the embedding type, except if the resetEmbeddingType is false, then reset it to true!
+            if (vm.resetEmbeddingType) {
+                vm.embeddingType = '';
             } else {
-
-                // Store all p-values of all experiments but only those that are above p-value threshold. 
-                // All of these GO terms will be embedded, but only some will be actually visible!
-                this.experimentEnrichmentsFiltered = 
-                    new Map( [...vm.experimentEnrichmentsFiltered]
-                        .map( x => [ x[0],
-                                     Object.fromEntries(
-                                        Object.entries(x[1]).filter(y => y[1] < vm.thresholdPvalue ) 
-                                     ) 
-                                   ] )
-                        .filter( x => Object.keys(x[1]).length != 0 )
-                    );
-                
+                vm.resetEmbeddingType = true;
             }
 
-            // TODO: Will run manually outside of this function!
-            // vm.updateTermsData();
-            
+            // TODO: Reinitialize the Map before you run the Revigo algorithm!
+            //       In single experiment case it is actually an Array, but then it will be simply overwritten!
+            vm.remaining_terms_all = new Map(); 
+
+            // End time for Revigo is taken in filterRevigoDone watcher!
+            vm.revigoStartTime = performance.now();
+
+            vm.revigoStatus['algorithm'] = 'Revigo';
+            vm.revigoStatus['start'] = false;
+            vm.revigoStatus['loading'] = true;
+            vm.revigoStatus['termCount'] = vm.multipleExperimentSetting ? 
+                                                vm.experimentEnrichmentsFilteredDAG.size : 
+                                                vm.enrichmentsFilteredDAG.length;
+            vm.revigoStatus['duration'] = 0;
+            vm.revigoStatus['namespace'] = vm.ontologyName;
+            vm.revigoStatus['result'] = '';
+
+            // Reset the LCA progress bar so it doesn't display old information when Revigo is calculated
+            vm.lcaStatus['start'] = true;
+
+            // Single experiment setting
+            if (!this.multipleExperimentSetting) {
+
+                if (vm.revigoAlgorithmType=='LCA') {
+                    this.revigoWorker.postMessage([vm.revigoAlgorithmType,
+                                                   vm.enrichmentsFilteredDAG, 
+                                                   vm.terms,
+                                                   vm.dag]);
+                } else {
+                    this.revigoWorker.postMessage([vm.revigoAlgorithmType,
+                                                   vm.enrichmentsFiltered, 
+                                                   vm.terms,
+                                                   vm.dag,
+                                                   vm.nmfEmbedding]);
+                }
+
+                this.revigoWorker.onmessage = function(e) {
+
+                    // If the output from web worker is progress then set the progress status variable.
+                    if (e.data[0]=="progress") {
+                        vm.revigoStatus['progress'] = ((e.data[1]/e.data[2])*100).toFixed(0);
+                        return;
+                    }
+
+                    // TODO: Non-redundant terms are stored as keys!
+                    // vm.remaining_terms_all = e.data; 
+                    vm.remaining_terms_all = Array.from(e.data.keys());
+
+                    // TODO: Redundancy Map, which term is represented by some other term!
+                    //       Generalize this to the multiple experiment case as well!
+                    vm.redundancyMap = new Map([...e.data].map(x=>x[1].map(y=>[y,x[0]]))
+                                                          .reduce((arr,t)=>arr.concat(t),[]));
+                };
+
+            // Multiple experiment setting
+            } else {
+
+                // Send pairs of terms for LCA calculation to a worker, in batches for each experiment
+                for (const experiment of vm.experiments) {
+
+                    // let enrichmentsFromExperiment = [...vm.experimentEnrichmentsFiltered]
+                    let enrichmentsFromExperiment = [...vm.experimentEnrichmentsFilteredDAG] // TODO: TESTING!
+                        .map( x => x[1].hasOwnProperty(experiment) ? [x[0],x[1][experiment]] : null )
+                        .filter( x => x !== null );
+
+                    if (vm.revigoAlgorithmType=='LCA') {
+
+                        // Send data to web worker that runs Revigo algorithm
+                        // In multiple experiment setting we also pass the name of the experiment
+                        this.revigoWorker.postMessage([vm.revigoAlgorithmType,
+                                                       enrichmentsFromExperiment,
+                                                       vm.terms,
+                                                       vm.dag,
+                                                       experiment]); // Pass the name of the experiment as well!
+                    } else {
+
+                        // Send data to web worker that runs Revigo algorithm
+                        this.revigoWorker.postMessage([vm.revigoAlgorithmType,
+                                                       enrichmentsFromExperiment,
+                                                       vm.terms,
+                                                       vm.dag,
+                                                       vm.nmfEmbedding,
+                                                       experiment]); // Pass the name of the experiment as well!
+                    }
+                }
+
+                // Wait for the worker to return non-reduntant GO terms from Revigo algorithm
+                this.revigoWorker.onmessage = function(e) {
+                    
+                    // If the output from web worker is progress then set the progress status variable.
+                    if (e.data[0]=="progress") {
+                        vm.revigoStatus['progress'] = ((e.data[2]/e.data[3])*100).toFixed(0);
+                        vm.revigoStatus['experiment'] = e.data[1];
+                        return;
+                    }
+
+                    // Im multiple experiment setting we get both the results and the name of the experiment
+                    // TODO: Non-redundant terms are stored as keys!
+                    // let remaining_terms = e.data[0];
+                    let remaining_terms = Array.from(e.data[0].keys());
+                    let experiment = e.data[1];
+
+                    console.log("revigo/methods/filterRevigo: Remaining terms for the "+experiment+"...");
+                    console.log(remaining_terms);
+
+                    // A hack to force triggering a watch expression on remaining_terms_all, as Vue 2.0
+                    // is not reactive on changes to Map and Set (although it is on their assignment)
+                    vm.remaining_terms_all = new Map(vm.remaining_terms_all.set(experiment,remaining_terms));
+
+                    // Results are aggregated asynchronously in remaining_terms_all watcher!
+
+                    // Redundancy Map, which term is represented by some other term!
+                    // This is a generalization to the multiple experiment case, a Map of Maps,
+                    // every experiment is stored as a entry in a Map!
+                    vm.redundancyMap = new Map(vm.redundancyMap.set(
+                        experiment,
+                        new Map([...e.data[0]].map(x=>x[1].map(y=>[y,x[0]]))
+                                                          .reduce((arr,t)=>arr.concat(t),[]))
+                    ));
+                    // console.log(vm.redundancyMap);
+
+                };
+
+            }
+
         },
 
         updateTermsData: function() {
@@ -508,6 +778,7 @@ var app = new Vue({
                     return [key,
                             {'pvalue': value, 
                              'frequency': vm.terms[d[0]] || 1, // assign default value to missing GO terms
+                             'description': vm.names[d[0]],
                              'selected': true}
                     ];
                 }));
@@ -518,26 +789,32 @@ var app = new Vue({
             } else {
 
                 // We use a new variable experimentEnrichmentsFiltered which already has only those
-                // GO terms that exist in our DAG and only enrichments lower than threshold p-value.
+                // GO terms that exist in our DAG and which are non-redundant by Revigo algorithm.
                 // First experiment is selected by default!
                 this.termsData = 
                     new Map( [...vm.experimentEnrichmentsFiltered] 
                         .map( x => [ x[0],
                                      {'pvalue': x[1].hasOwnProperty(vm.experiments[0]) ? 
-                                                x[1][vm.experiments[0]] : vm.thresholdPvalue, 
+                                                x[1][vm.experiments[0]] : undefined, 
                                       'frequency': vm.terms[x[0]] || 1,
+                                      'description': vm.names[x[0]],
                                       'selected': x[1].hasOwnProperty(vm.experiments[0])} ] )
                     );
+
+                // TODO: THESE CAN BE DEFINED EVEN EARLIER, NOT ONLY AFTER REVIGO FINISHES?!
+                // BUG: MOVED TO receiveDataFromChild AND NOW THE PCA BIPLOT IS NOT WORKING ANYMORE!
 
                 // If GO term is not present in some experiment give it p-value of 1.0
                 // TODO: Consider removing!
                 this.experimentDataTable = [...this.experimentEnrichmentsFiltered]
+                // this.experimentDataTable = [...this.experimentEnrichmentsFilteredDAG] // TODO: TESTING!
                     .map( x => vm.experiments.map( e => e in x[1] ? x[1][e] : 1.0 ) );  
 
-                // Experiment data table where all GO terms are present!
-                // TODO: This is the one we should keep!
-                this.experimentDataTableUnfiltered = [...this.experimentEnrichments]
-                    .map( x => vm.experiments.map( e => e in x[1] ? x[1][e] : 1.0 ) );  
+                // // Experiment data table where all GO terms are present!
+                // // TODO: This is the one we should keep!
+                // // this.experimentDataTableUnfiltered = [...this.experimentEnrichments]
+                // this.experimentDataTableUnfiltered = [...this.experimentEnrichmentsFilteredDAG] // TODO: TESTING!
+                //     .map( x => vm.experiments.map( e => e in x[1] ? x[1][e] : 1.0 ) );  
 
             }
             
@@ -553,13 +830,22 @@ var app = new Vue({
             Promise.all(["data/go-dag-molecular-function.json",
                "data/go-dag-cellular-component.json",
                "data/go-dag-biological-process.json",
-               "data/go-terms-count-goa.json"].map(url=>vm.getUrl(url))) 
-               .then(([dagMol,dagCell,dagBio,terms]) => { 
+               "data/go-terms-count-goa.json",
+               "data/go-names.json",
+               "data/nmf_embedding_biological_process.json",
+               "data/nmf_embedding_molecular_function.json",
+               "data/nmf_embedding_cellular_component.json"].map(url=>vm.getUrl(url))) 
+               .then(([dagMol,dagCell,dagBio,terms,names,nmfEmbeddingBio,nmfEmbeddingMol,nmfEmbeddingCell]) => { 
                     vm.dag = dagBio;
                     vm.dagBio = dagBio;
                     vm.dagMol = dagMol;
                     vm.dagCell = dagCell;
                     vm.terms = terms; 
+                    vm.names = names;
+                    vm.nmfEmbedding = nmfEmbeddingBio;
+                    vm.nmfEmbeddingBio = nmfEmbeddingBio;
+                    vm.nmfEmbeddingMol = nmfEmbeddingMol;
+                    vm.nmfEmbeddingCell = nmfEmbeddingCell;
                     vm.basicDataLoaded = true;
            });
         },
@@ -583,13 +869,14 @@ var app = new Vue({
             let t0 = performance.now();
             this.lcaWorker.postMessage([P,this.dag]);
 
-            vm.loadingStatus = {'start':false,
-                                'loading':true, 
-                                'length':vm.termsData.size, 
-                                't0':0, 
-                                't1':0, 
-                                'label':vm.ontologyName,
-                                'warning':vm.loadingStatus['warning']};
+            vm.lcaStatus = {'algorithm': 'LCA',
+                            'start':false,
+                            'loading':true, 
+                            'termCount':vm.termsData.size, 
+                            'duration': 0,
+                            'namespace':vm.ontologyName,
+                            'result': '',
+                            'warning':vm.lcaStatus['warning']};
 
             console.log('revigo/calculateLCA: Sent pairs and dag to worker!');
 
@@ -598,13 +885,14 @@ var app = new Vue({
                 
                 let t1 = performance.now();
 
-                vm.loadingStatus = {'start':false,
-                                    'loading':false, 
-                                    'length':vm.termsData.size, 
-                                    't0':t0, 
-                                    't1':t1, 
-                                    'label':vm.ontologyName,
-                                    'warning':vm.loadingStatus['warning']};
+                vm.lcaStatus = {'algorithm': 'LCA',
+                                'start':false,
+                                'loading':false, 
+                                'termCount':vm.termsData.size, 
+                                'duration': t1-t0,
+                                'namespace':vm.ontologyName,
+                                'result': '',
+                                'warning':vm.lcaStatus['warning']};
 
                 vm.results = e.data; 
                 console.log("revigo/calculateLCA/onmessage: Calculated LCA in the worker!");
@@ -756,7 +1044,8 @@ var app = new Vue({
             // Marks the significant GO terms in each experiment
             // We use experimentDataTableUnfiltered to determine which GO terms are significant or
             // not significant in certain experiments, depending on their p-value.
-            let temp = zip(vm.experimentDataTableUnfiltered,infoContentGO).map( function(x) {
+            // let temp = zip(vm.experimentDataTableUnfiltered,infoContentGO).map( function(x) {
+            let temp = zip([...this.experimentEnrichmentsFilteredDAG],infoContentGO).map( function(x) {
                 return [x[0].map( function(y) {
                     return y <= vm.selectedPvalue;
                 }),x[1]];
@@ -844,8 +1133,9 @@ var app = new Vue({
 });
 
 Vue.component('progress-box', {
-    // Fields in loadingStatus are "loading", "length", "t0", "t1", "label", "warning"
-    props: ["loadingstatus","thresholdpvalue"], 
+    // Fields in loadingStatus are 'algorithm', 'start', 'loading', 'progress' (only for Revigo), 
+    //                             'experiment', 'termCount', 'duration', 'namespace', 'result', 'warning'.
+    props: ["loadingstatus"], 
     data: function() {
         return;
     },
@@ -854,15 +1144,22 @@ Vue.component('progress-box', {
             if (this.loadingstatus['start']) {
                 return '';
             } else if (this.loadingstatus['loading']) {
-                return 'Calculating semantic similarities between '+this.loadingstatus['length']+
-                       ' selected '+this.loadingstatus['label']+
-                       ' GO terms with p<'+this.thresholdpvalue+' <img src="static/ajax-loader.gif">';
+                return 'Calculating '+this.loadingstatus['algorithm']+
+                       ' between '+this.loadingstatus['termCount']+
+                       ' '+this.loadingstatus['namespace']+
+                       ((this.loadingstatus['algorithm']=='Revigo') ?
+                            ' GO terms.</br>' + this.loadingstatus['progress'] + '% redundant terms removed' +
+                            ((this.loadingstatus['experiment']!=='') ? 
+                                    ' for experiment ' + this.loadingstatus['experiment'] + '.' :
+                                    '.') :
+                            ' GO terms <img src="static/ajax-loader.gif">');
              } else if (!this.loadingstatus['loading']) {
-                return "Calculated semantic similaritites between "+this.loadingstatus['length']+
-                       " selected "+this.loadingstatus['label']+
-                       " GO terms with p<"+this.thresholdpvalue+" GO terms in "+
-                       (this.loadingstatus['t1']-this.loadingstatus['t0']).toFixed(0)+" miliseconds!"+
-                       '<span style="color:red">'+
+                return "Calculated "+this.loadingstatus['algorithm']+
+                       " between "+this.loadingstatus['termCount']+
+                       " "+this.loadingstatus['namespace']+
+                       " GO terms in "+
+                       this.loadingstatus['duration'].toFixed(0)+" miliseconds!"+
+                       '</br><span style="color:red">'+
                        ((this.loadingstatus['warning']!='')?(' '+this.loadingstatus['warning']):'')+
                        '</span>';
              }
@@ -1040,7 +1337,7 @@ Vue.component('input-box', {
 
 Vue.component('scatter-plot', {
 
-    props: ["loadingstatus",
+    props: ["lcastatus",
             "distmat",
             "nodedata",
             "embeddingtype",
@@ -1079,7 +1376,8 @@ Vue.component('scatter-plot', {
         // Needed so that tooltips (which have absolute position) are positioned correctly
         d3.select(this.$el)
           .style('position','relative')
-          .style('width','fit-content');
+          .style('width','fit-content')
+          .style('width','-moz-fit-content'); // For Firefox!
 
         // NOTE: lower() is used to position element as the first child of its parent.
         //       As we have a form for choosing embedding type in our scatter plot component
@@ -1130,8 +1428,8 @@ Vue.component('scatter-plot', {
 
     },
     watch: {
-        loadingstatus() {
-            console.log('scatter-plot/watch/loadingstatus: Data is being loaded, better clean the plot!');
+        lcastatus() {
+            console.log('scatter-plot/watch/lcastatus: LCA is being calculated, better clean the plot!');
             let vm = this;
             
             vm.cleanPlot();
@@ -1146,6 +1444,11 @@ Vue.component('scatter-plot', {
             // console.log('scatter-plot/watch/nodedata: nodedata changed!'); // Fires too much times!
             let vm = this;
 
+            // If the embedding type is not defined do not continue with the visualization!
+            if (vm.embeddingtype=='') {
+                return;
+            }
+
             // If we are visualizing GO terms or experiments in scatter plot layout
 
             // Initialize domains for the p-value and radius legends
@@ -1154,14 +1457,22 @@ Vue.component('scatter-plot', {
             if (['go-go','go-ex'].includes(vm.visualizationcontext)) {
 
                 // Set scale for radius which depends on the frequency of newly loaded GO terms
+                // NOTE: We include even the terms that are not part of the currently shown experiment!
                 fmax = Math.max(...Array.from(this.nodedata.values()).map(x=>x.frequency));
                 fmin = Math.min(...Array.from(this.nodedata.values()).map(x=>x.frequency));
                 vm.scaleR.domain([fmin, fmax]);
 
                 // Set scale for color which depends on the pvalues of newly loaded GO terms
-                pmax = Math.max(...Array.from(this.nodedata.values()).map(x=>x.pvalue));
-                pmin = Math.min(...Array.from(this.nodedata.values()).map(x=>x.pvalue));
+                // NOTE: We do not include terms which are not part of the currently shown experiment!
+                pmax = Math.max(...Array.from(this.nodedata.values()).filter(x=>x.selected).map(x=>x.pvalue));
+                pmin = Math.min(...Array.from(this.nodedata.values()).filter(x=>x.selected).map(x=>x.pvalue));
                 vm.scaleP.domain([pmin, pmax]);
+
+                // TODO: MOVED HERE FROM DRAW NODES!
+                // Draw legend for p-values (node color)
+                vm.drawPlegend("#legendP", vm.scaleP, "p-value");
+                // Draw legend for GOA annotations (circle radius)
+                vm.drawRlegend("#legendR", vm.scaleR, "Annotations");
 
             }
 
@@ -1205,6 +1516,7 @@ Vue.component('scatter-plot', {
                 });
             }
         },
+
         distmat(newDataLoaded, oldDataLoaded) {
             console.log("scatter-plot/watch/distmat: Distmat changed, will check for nodedata as well!");
             let vm = this;
@@ -1241,7 +1553,8 @@ Vue.component('scatter-plot', {
             let vm = this;
 
             // If we are drawing PCA biplot we need experimentdatatable and nodedata to correspond!
-            if (vm.embeddingtype=='biplot') {
+            // if (vm.embeddingtype=='biplot') {
+            if (['biplot','network'].includes(vm.embeddingtype)) { // TODO: FOR NETWORK AND BIPLOT LAYOUT!
 
                 if (this.experimentdatatable!=0 && this.nodedata.size!=0 &&
                     this.experimentdatatable.length==this.nodedata.size) {
@@ -1272,7 +1585,7 @@ Vue.component('scatter-plot', {
 
         experimentdatatable(newExperimentDataTable,oldExperimentDataTable) {
             let vm = this;
-            console.log("scatter-plot/watch/exaperimentdatatable: Experiment data table changed!");
+            console.log("scatter-plot/watch/experimentdatatable: Experiment data table changed!");
 
             vm.drawCanvas();
 
@@ -1287,6 +1600,7 @@ Vue.component('scatter-plot', {
             vm.drawExperimentHierarchy();
 
         }
+
     },
     methods: {
 
@@ -1394,8 +1708,10 @@ Vue.component('scatter-plot', {
                     umap.initializeFit(data);
                 } 
                 catch {
-                    console.log("Error - There is too few data points for calculation of UMAP! Need more than "+vm.nNeighbors+"!");
-                    this.$emit('status',"Error - There is too few data points for calculation of UMAP! Need more than "+vm.nNeighbors+"!");
+                    console.log("Error - There is too few data points for calculation of UMAP! "+
+                                "Need more than "+vm.nNeighbors+"!");
+                    this.$emit('status',"Error - There is too few data points for calculation of UMAP! "+
+                                "Need more than "+vm.nNeighbors+"!");
                     return;
                 }
 
@@ -1440,6 +1756,18 @@ Vue.component('scatter-plot', {
                 //       by the drawNodes in the nodedata watcher! So arrows are drawn there!
                 //       The PCA loadings need to be accessible within the whole component for this to work!
 
+            } else if (vm.embeddingtype=='network') {
+                console.log("scatter-plot/methods/drawCanvas: Calculating network embedding!");
+
+                // TODO: Experiment data table is calculated in the main app!
+                console.log(this.experimentdatatable);
+
+                // TODO: FINISH THIS! CALCULATE CORRELATION MATRIX AND DRAW NETWORK!
+
+                // // Coordinates need to be in [[x,y],...] and not in [[x,...],[y,...]]
+                // var Y = zip(adData.adjustedData[0],adData.adjustedData[1]); 
+                // vm.updateCoordinates(Y);
+
             }
 
             // TODO: Maybe separate this is another function? This makes sense if we will reuse code for
@@ -1475,7 +1803,10 @@ Vue.component('scatter-plot', {
                           } else {
                               return closestNode.name+
                                      "</br>GOA annotations: "+closestNode.frequency+
-                                     "</br>p-value: "+closestNode.pvalue; 
+                                     "</br>description: "+closestNode.description+
+                                     ((typeof closestNode.pvalue !== 'undefined') ? 
+                                         "</br>p-value: "+closestNode.pvalue : 
+                                         ""); 
                           }
                       });
                 } else {
@@ -1593,16 +1924,18 @@ Vue.component('scatter-plot', {
 
             let vm = this;
 
-            // p-value and annotations legend only makes sense when nodes are GO terms, not experiments!
-            if (['go-go','go-ex'].includes(vm.visualizationcontext)) {
+            // // TODO: MOVED WHERE WE DEFINE LEGEND SCALES IN NODEDATA WATCHER!
+            // //       CONSIDER WHETHER WE NEED IT IN UPDATECOORDINATES AS WELL!
+            // // p-value and annotations legend only makes sense when nodes are GO terms, not experiments!
+            // if (['go-go','go-ex'].includes(vm.visualizationcontext)) {
 
-                // Draw legend for p-values (node color)
-                vm.drawPlegend("#legendP", vm.scaleP, "p-value");
+            //     // Draw legend for p-values (node color)
+            //     vm.drawPlegend("#legendP", vm.scaleP, "p-value");
 
 
-                // Draw legend for GOA annotations (circle radius)
-                vm.drawRlegend("#legendR", vm.scaleR, "Annotations");
-            }
+            //     // Draw legend for GOA annotations (circle radius)
+            //     vm.drawRlegend("#legendR", vm.scaleR, "Annotations");
+            // }
 
 
             // Check whether coordinates of the nodes are ready
@@ -1636,7 +1969,7 @@ Vue.component('scatter-plot', {
 
           var legendheight = 200,
               legendwidth = 80,
-              margin = {top: 20, right: 60, bottom: 10, left: 2};
+              margin = {top: 25, right: 60, bottom: 10, left: 2};
           
           d3.select(selector_id).selectAll("*").remove();
 
@@ -1703,8 +2036,8 @@ Vue.component('scatter-plot', {
         drawRlegend: function(selector_id, sizescale, legendLabel) {
 
           var legendheight = 150,
-              legendwidth = 80,
-              margin = {top: 20, right: 60, bottom: 10, left: 2};
+              legendwidth = 110,
+              margin = {top: 30, right: 100, bottom: 10, left: 2};
 
           d3.select(selector_id).selectAll("*").remove();
 
@@ -2004,11 +2337,14 @@ Vue.component('download-csv', {
 
 Vue.component('data-table', {
 
-    props: ["nodedata",
-            "experimentdatatableunfiltered",
-            "experimentenrichments",
+    props: ["experimentenrichments",
             "experiments",
-            "multipleexperimentsetting"],
+            "multipleexperimentsetting",
+            "enrichmentsfiltereddag",
+            "names",
+            "remainingterms",
+            "representatives",
+            "experiment"],
 
     data: function() {
         return {
@@ -2024,122 +2360,258 @@ Vue.component('data-table', {
 
     },
 
-    watch: {
+    computed: {
 
-        // Used in the single experiment setting.
-        nodedata: function(newNodeData,oldNodeData) {
-            let vm = this;
-            console.log("data-table/watch/nodedata: nodedata changed!");
+        // Whether both experiment enrichments and non-redundant terms are ready!
+        // Watches for the changes in both remaining terms and experiment enrichments!
+        dataWatcher: function() {
 
-            if (!vm.multipleexperimentsetting) {
+            // return [this.remainingterms,this.experimentenrichments,this.enrichmentsfiltereddag];
 
-                let tabledata = [...vm.nodedata].map(function(d){return [d[0],d[1].pvalue]});
+            // console.log([this.remainingterms,this.experimentenrichments,this.enrichmentsfiltereddag,this.experiment]);
 
-                // Existing datatable cannot be reinitialized, so if it already exist destroy it before
-                if ($.fn.dataTable.isDataTable( this.$refs.datatable )) {
-                    console.log("data-table/watch/nodedata: Destroying existing table!");
-                    vm.table.destroy(); // Not enough, we need to empty table as well!
-                    $(vm.$refs.datatable).empty();
-                }
-
-                // Set scale for color which depends on the pvalues of newly loaded GO terms
-                let pmax = Math.max(...Array.from(vm.nodedata.values()).map(x=>x.pvalue));
-                let pmin = Math.min(...Array.from(vm.nodedata.values()).map(x=>x.pvalue));
-                vm.scaleP.domain([pmin, pmax]);
-
-                vm.table = $(this.$refs.datatable).DataTable( {
-                        scrollY:        "200px",
-                        scrollCollapse: true,
-                        // paging:         false,
-                        deferRender:    true, // Faster on large tables!
-                        scroller:       true,  // Requires pagination to be disabled (paging: false)! 
-                        data: tabledata,
-                        columns: [
-                            { title: "GO term" },
-                            { title: "p-value",
-                              // width: "15px",
-                              render: function(data,type,row,meta) {
-                                return "<div style='background-color:"+vm.scaleP(data)+"'>"+
-                                       Number.parseFloat(data).toExponential(1)+
-                                       "<div>";
-                              }
-                            }
-                        ]
-                    } );
-            }
-
-        },
-
-        experimentdatatableunfiltered: function() {
-            let vm = this;
-            console.log("data-table/watch/experimentdatatableunfiltered: changed!");
-        },
-
-        // Used in the multiple experiment setting.
-        experimentenrichments: function() {
-            let vm = this;
-            console.log("data-table/watch/experimentenrichments: changed!");
-
-            if (vm.multipleexperimentsetting) {
-
-                let tabledata = [...vm.experimentenrichments].map(x=>
-                    [x[0]].concat(vm.experiments.map(y=>x[1][y]))
-                );
-
-                // Existing datatable cannot be reinitialized, so if it already exist destroy it before
-                if ($.fn.dataTable.isDataTable( this.$refs.datatable )) {
-                    console.log("data-table/watch/experimentenrichments: Destroying existing table!");
-                    vm.table.destroy(); // Not enough, we need to empty table as well!
-                    $(vm.$refs.datatable).empty();
-                }
-
-                // Set scale for color which depends on the pvalues of newly loaded GO terms
-                let pmax = Math.max(...Array.from(vm.nodedata.values()).map(x=>x.pvalue));
-                let pmin = Math.min(...Array.from(vm.nodedata.values()).map(x=>x.pvalue));
-                vm.scaleP.domain([pmin, pmax]);
-
-                vm.table = $(this.$refs.datatable).DataTable( {
-                        scrollY:        "200px",
-                        scrollCollapse: true,
-                        deferRender:    true, // Faster on large tables!
-                        scroller:       true,  // Requires pagination to be disabled (paging: false)! 
-                        data: tabledata,
-                        columns: [ { title: "GO term" , 
-                                     defaultContent: "", 
-                                 } ].concat(
-                            vm.experiments.map( function(d,i) {
-                                return {title: String(i), 
-                                    defaultContent: "", // Not needed because we are handling it in render!
-                                    // width: "15px",
-                                    render: function(data,type,row,meta) {
-                                        return "<div style='background-color:"+
-                                               ((data<0.01)?vm.scaleP(data):"white")+"'>"+
-                                               ((typeof data !== 'undefined')?
-                                                Number.parseFloat(data).toExponential(1):
-                                                "")+
-                                               "<div>";
-
-                                    }
-                                };
-                            })
-                        )
-                    } );
-
-                // Putting tooltips on headers
-                vm.table
-                  .columns()
-                  .header()
-                  .to$()
-                  .attr('data-toggle','tooltip')
-                  .attr('title',function(){
-                      if (Number.isInteger(Number($(this).text()))) {
-                          return vm.experiments[Number($(this).text())];
-                      }
-                  });
-
-            }
+            // TODO: IT IS BETTER TO SIMPLY REDRAW THE WHOLE TABLE WHEN EXPERIMENT CHANGES!  
+            return [this.remainingterms,this.experimentenrichments,this.enrichmentsfiltereddag,this.experiment];
 
         }
+    },
+
+    watch: {
+
+        // // TODO: IT IS BETTER TO SIMPLY REDRAW THE WHOLE TABLE WHEN EXPERIMENT CHANGES!  
+        // // experiment: function(newData,oldData) {
+        //     let vm = this;
+        //     console.log("data-table/watch/experiment: Experiment changed, redrawing hierarchy in the table!");
+
+        //     // TODO: When selected experiment change redraw Revigo redundancy hierarchy in the table!
+
+        // },
+
+        dataWatcher: function(newData,oldData) {
+            let vm = this;
+            console.log("data-table/watch/dataWatcher: Checking data for data table!");
+
+            // Single experiment setting
+            if (!vm.multipleexperimentsetting) {
+
+                if (vm.remainingterms.length!=0 && vm.enrichmentsfiltereddag.length!=0) {
+
+                    // TODO: MODIFY TABLEDATA SO THAT REDUNDANT TERMS ARE PLACED RIGHT BELLOW THEIR
+                    //       NON-REDUNDAT REPRESENTATIVES!
+                    //       Hmmm, unfortunatelly we don't have this connection in the remaining terms? :-(
+
+                    // console.log(vm.representatives);
+
+                    // let tabledata = [...vm.nodedata].map(function(d){return [d[0],d[1].pvalue]});
+                    // let tabledata = vm.enrichmentsfiltereddag;
+
+                    // TODO: Add column with representative terms!
+                    // let tabledata = vm.enrichmentsfiltereddag.map(x=>[x[0],vm.names[x[0]],x[1]]);
+                    // let tabledata = vm.enrichmentsfiltereddag.map(x=>[vm.representatives.get(x[0]),x[0],vm.names[x[0]],x[1]]);
+                    let tabledata = vm.enrichmentsfiltereddag.map(
+                        x => [vm.representatives.has(x[0]) ? vm.representatives.get(x[0]) : x[0],
+                              x[0],
+                              vm.names[x[0]],x[1]]
+                    );
+
+                    // Existing datatable cannot be reinitialized, so if it already exist destroy it before
+                    if ($.fn.dataTable.isDataTable( this.$refs.datatable )) {
+                        console.log("data-table/watch/dataWatcher: Destroying existing table!");
+                        vm.table.destroy(); // Not enough, we need to empty table as well!
+                        $(vm.$refs.datatable).empty();
+                    }
+
+                    // Set scale for color which depends on the pvalues of newly loaded GO terms
+
+                    // TODO: The p-value color scale should be defined only for the non-redundant terms, 
+                    //       while here we are calculating it for all terms! (Also in multiple experiment case!)
+                    
+                    // let pmax = Math.max(...vm.enrichmentsfiltereddag.map(x=>x[1]));
+                    // let pmin = Math.min(...vm.enrichmentsfiltereddag.map(x=>x[1]));
+
+                    let pvalues = vm.enrichmentsfiltereddag
+                                    .filter(x=>vm.remainingterms.includes(x[0]))
+                                    .map(x=>x[1]);
+                    let pmax = Math.max(...pvalues);
+                    let pmin = Math.min(...pvalues);
+
+                    vm.scaleP.domain([pmin, pmax]);
+
+                    vm.table = $(this.$refs.datatable).DataTable( {
+                            scrollY:        "200px",
+                            scrollCollapse: true,
+                            paging:         false,
+                            deferRender:    true, // Faster on large tables!
+                            // scroller:       true,  // Requires pagination to be disabled (paging: false)! 
+                            // autoWidth:      false,
+                            // fixedColumns: true,
+                            data: tabledata,
+                            columns: [
+
+                                { title: "Representative" , 
+                                  width: "70px", 
+                                  defaultContent: "",
+                                  render: function(data,type,row,meta) {
+                                    return "<div style='color:"+
+                                            // (vm.representatives.has(row[0]) ?  "black" : "gray")+"'>"+
+                                            ( (row[0] != row[1]) ? "black" : "LightGray" )+"'>"+
+                                            row[0] + 
+                                            ( (row[0] == row[1]) ? "*" : "" ) + 
+                                            "<div>";
+                                  }
+                                }, 
+
+                                { title: "GO term" , width: "70px"},
+                                // { title: "description", width: "100px" },
+
+                                { title: "description"},
+
+                                { title: "p-value",
+                                  width: "70px",
+                                  className: 'dt-body-center',
+                                  render: function(data,type,row,meta) {
+                                    // let term = row[0]; // TODO: row[1] if there is representative column!
+                                    let term = row[1]; // TODO: row[0] if there is no representative column!
+                                    let pvalue = data;
+                                    // return "<div style='background-color:"+vm.scaleP(data)+"'>"+
+                                    return "<div style='background-color:"+
+                                           ((vm.remainingterms.includes(term)) ?
+                                               vm.scaleP(pvalue) :
+                                               "white")+"'>"+
+                                           Number.parseFloat(data).toExponential(1)+
+                                           "<div>";
+                                  }
+                                }
+                            ]
+                        } );
+                }
+
+            } else {
+                // Multiple experiment setting
+
+                // TODO: Check whether remaining terms is filled with all experiments!
+
+                if (vm.remainingterms.length!=0 && vm.experimentenrichments.length!=0) {
+
+                    // console.log('READY TO RENDER TABLE!');
+                    // console.log(vm.remainingterms);
+                    // console.log(vm.experimentenrichments);
+                    // console.log(vm.representatives)
+
+                    // Extract representatives for a current experiment and redraw the whole table
+                    let representativesExperiment = vm.representatives.get(vm.experiment);
+                    let tabledata = [...vm.experimentenrichments].map(
+                        x => [representativesExperiment.has(x[0]) ? 
+                                representativesExperiment.get(x[0]) : 
+                                x[0], // representatives
+                              x[0], // GO term id
+                              vm.names[x[0]]].concat(vm.experiments.map(y=>x[1][y])) // GO term description
+                    );
+
+                    // Existing datatable cannot be reinitialized, so if it already exist destroy it before
+                    if ($.fn.dataTable.isDataTable( this.$refs.datatable )) {
+                        console.log("data-table/watch/experimentenrichments: Destroying existing table!");
+                        vm.table.destroy(); // Not enough, we need to empty table as well!
+                        $(vm.$refs.datatable).empty();
+                    }
+
+                    // Construct an array of p-value scales - one for each column/experiments!
+                    // The p-value color scale should be defined only for the non-redundant terms.
+
+                    // Applies a function to all p-values from each experiment, and outputs the result as 
+                    // a Map along with the experiment name
+                    let maxMin = function(f) {
+                        return new Map(vm.experiments.map(e => [e,
+                        f(...[...vm.experimentenrichments] // f will later be either Math.min or Math.max
+                            .filter(x=>vm.remainingterms.includes(x[0])) // Only non-redundant terms!
+                            .map(y => y[1].hasOwnProperty(e) ? 
+                                                   y[1][e] : 
+                                                   null) // These will be filtered out later
+                            .filter(x=>x) // Filter out null values from previous map
+                        )] 
+                    ))};
+
+                    // Apply Math.min and Math.max functions to find min and max p-values for each experiment
+                    let minValues = maxMin(Math.min);
+                    let maxValues = maxMin(Math.max);
+
+                    // An array of scales for color which depends on the pvalues of newly loaded GO terms
+                    let experimentScales = new Map(vm.experiments.map( e => [ e, 
+                        vm.scaleP.domain([minValues.get(e),maxValues.get(e)]) ] ));
+
+                    vm.table = $(this.$refs.datatable).DataTable( {
+                            scrollY:        "400px",
+                            scrollCollapse: true,
+                            deferRender:    true, // Faster on large tables!
+                            // scroller:       true,  // Requires pagination to be disabled (paging: false)! 
+                            paging: false,
+                            // autoWidth:      false,
+                            data: tabledata,
+                            columns: [ 
+
+                                { title: "Representative" , 
+                                  width: "70px", 
+                                  defaultContent: "",
+                                  render: function(data,type,row,meta) {
+                                    return "<div style='color:"+
+                                            // (vm.representatives.has(row[0]) ?  "black" : "gray")+"'>"+
+                                            ( (row[0] != row[1]) ? "black" : "LightGray" )+"'>"+
+                                            row[0] + 
+                                            ( (row[0] == row[1]) ? "*" : "" ) + 
+                                            "<div>";
+                                  }
+                                }, 
+
+                               { title: "Term ID" , defaultContent: "" },
+                               // { title: "description", defaultContent: "", width: "100px"} ].concat( 
+
+                               { title: "description", defaultContent: ""} ].concat( 
+                                vm.experiments.map( function(d,i) {
+                                    return {title: String(i), 
+                                        defaultContent: "", // Not needed because we are handling it in render!
+                                        width: "50px",
+                                        className: 'dt-body-center',
+                                        // TODO: Past versions of handling p-value color:
+                                        //       experimentScales.get(d)(data)+"'>"+
+                                        //       ((data<0.01)?experimentScales.get(d)(data):"white")+"'>"+
+                                        //       ((data<0.01)?vm.scaleP(data):"white")+"'>"+
+                                        render: function(data,type,row,meta) {
+                                            let term = row[0];
+                                            let experiment = d;
+                                            let pvalue = data;
+                                            return "<div style='background-color:"+
+                                                   ((vm.remainingterms.includes(term)) ?
+                                                       experimentScales.get(experiment)(pvalue) :
+                                                       "white")+"'>"+
+                                                   ((typeof data !== 'undefined') ?
+                                                        Number.parseFloat(pvalue).toExponential(1) :
+                                                        "")+
+                                                   "<div>";
+
+                                        }
+                                    };
+                                })
+                            )
+                        } );
+
+                    // Putting tooltips on headers
+                    vm.table
+                      .columns()
+                      .header()
+                      .to$()
+                      .attr('data-toggle','tooltip')
+                      .attr('title',function(){
+                          // Assumption is that header titles are simple integers!
+                          if (Number.isInteger(Number($(this).text()))) {
+                              return vm.experiments[Number($(this).text())];
+                          }
+                      });
+
+                }
+
+            }
+
+        },
 
     },
     // With the enclosing div in the template we have to access the table through a reference!
@@ -2150,5 +2622,4 @@ Vue.component('data-table', {
 
 // Custom zip function
 const zip = (arr1, arr2) => arr1.map((k, i) => [k, arr2[i]]); // custom zip function
-
 

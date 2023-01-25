@@ -25,6 +25,8 @@
 
 <link rel="icon" href="favicon.ico" type="image/x-icon" />
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/9.3.2/math.min.js"></script>
+
 <style>
 
 .hidden {
@@ -58,8 +60,15 @@ div#tooltip {
 
 /* To make data table even more compact! */
 table.dataTable.compact tbody td {
-    padding: 0px;
+    /* padding: 0px; */
+    padding: 5px;
 }
+
+/* table.dataTable tbody td {
+    word-wrap: break-word;
+    word-break: break-all;
+    max-width: 50px;
+} */
 
 </style>
 
@@ -79,7 +88,7 @@ MathJax = {
     <h1>Non-linear embedding of GO terms</h1>
     <div id="revigo">
 
-        <scatter-plot :loadingstatus="loadingStatus" 
+        <scatter-plot :lcastatus="lcaStatus" 
                       :distmat="distmat" 
                       :nodedata="nodeData" 
                       :embeddingtype="embeddingType" 
@@ -90,7 +99,8 @@ MathJax = {
                       @status=receiveStatusFromScatterPlot>
         </scatter-plot>
 
-        <progress-box :loadingstatus="loadingStatus" :thresholdpvalue="thresholdPvalue"></progress-box>
+        <progress-box :loadingstatus="revigoStatus"></progress-box>
+        <progress-box :loadingstatus="lcaStatus"></progress-box>
 
         <form v-if="multipleExperimentSetting">
             <input type="radio" 
@@ -140,6 +150,14 @@ MathJax = {
                    v-model="embeddingType">
             <label v-if="multipleExperimentSetting&&(visualizationContext=='go-ex')"
                    for="biplot">PCA biplot</label>
+
+            <input v-if="multipleExperimentSetting&&(visualizationContext=='go-ex')" 
+                   type="radio" 
+                   id="network" 
+                   value="network" 
+                   v-model="embeddingType">
+            <label v-if="multipleExperimentSetting&&(visualizationContext=='go-ex')"
+                   for="network">Network</label>
 
             <input v-if="multipleExperimentSetting&&(visualizationContext=='ex-ex')"
                    type="radio" 
@@ -211,11 +229,14 @@ MathJax = {
         </download-csv>
 
         <br><br>
-        <data-table :nodedata="nodeData"
-                    :experimentdatatableunfiltered="experimentDataTableUnfiltered"
-                    :experimentenrichments="experimentEnrichments"
+        <data-table :experimentenrichments="experimentEnrichmentsFilteredDAG"
                     :experiments="experiments"
-                    :multipleexperimentsetting="multipleExperimentSetting">
+                    :multipleexperimentsetting="multipleExperimentSetting"
+                    :enrichmentsfiltereddag="enrichmentsFilteredDAG"
+                    :names="names"
+                    :remainingterms="final_remaining_terms"
+                    :representatives="redundancyMap"
+                    :experiment="selectedExperiment">
         </data-table>
 
 

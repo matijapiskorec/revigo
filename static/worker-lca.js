@@ -10,5 +10,13 @@ onmessage = function(e) {
 
   let results = P.map( (p,i) => [p[0], p[1], LCA(dag,p[0],p[1])] );
   
-  postMessage(results);
+  // If third argument exists, pass it along with the results
+  // We use this to pass the name of the experiment in the multiple experiment case
+  if (typeof e.data[2] == 'undefined') {
+      postMessage(results);
+  } else {
+      postMessage([results,e.data[2]]);
+  }
+
+
 }
